@@ -1,6 +1,7 @@
 """Manager role definition. Coordination behavior itself lands in Phases 4/5."""
 
 from app.agents.base import AgentConfig
+from app.agents.structured import OutputKind
 from app.schemas import AgentRole, MessageType
 
 INSTRUCTIONS = """\
@@ -36,4 +37,5 @@ CONFIG = AgentConfig(
     instructions=INSTRUCTIONS,
     temperature=0.0,
     output_type=MessageType.PLAN,
+    output_kind=OutputKind.CLAIMS,
 )

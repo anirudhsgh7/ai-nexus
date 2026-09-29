@@ -4,6 +4,7 @@ import pytest
 
 from app.agents import ideator, manager, researcher, skeptic
 from app.agents.base import MAX_INSTRUCTION_CHARS
+from app.agents.structured import OutputKind
 from app.schemas import AgentRole, MessageType
 
 CONFIGS = {
@@ -35,6 +36,13 @@ OUTPUT_TYPES = {
     AgentRole.SKEPTIC: MessageType.CRITIQUE,
 }
 
+OUTPUT_KINDS = {
+    AgentRole.MANAGER: OutputKind.CLAIMS,
+    AgentRole.RESEARCHER: OutputKind.CLAIMS,
+    AgentRole.IDEATOR: OutputKind.CLAIMS,
+    AgentRole.SKEPTIC: OutputKind.VERDICTS,
+}
+
 
 def test_exactly_four_unique_roles():
     assert set(CONFIGS) == set(AgentRole)
@@ -49,6 +57,13 @@ def test_temperature_table():
 def test_output_type_mapping():
     for role, expected in OUTPUT_TYPES.items():
         assert CONFIGS[role].output_type is expected, role
+
+
+def test_output_kind_table():
+    """All four agents are structured-output producers (PRD §6.6)."""
+    for role, expected in OUTPUT_KINDS.items():
+        assert CONFIGS[role].output_kind is expected, role
+    assert all(c.output_kind is not OutputKind.PLAIN for c in CONFIGS.values())
 
 
 def test_capabilities_empty_in_phase2():

@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from uuid import uuid4
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.llm.base import ToolCall
 
@@ -18,7 +18,11 @@ __all__ = [
     "AgentMessage",
     "AgentRole",
     "Claim",
+    "ClaimStatus",
+    "ClaimVerdict",
+    "Evidence",
     "MessageType",
+    "Verdict",
 ]
 
 
@@ -42,21 +46,78 @@ class MessageType(str, Enum):
     SYNTHESIS = "synthesis"
 
 
+class ClaimStatus(str, Enum):
+    """Epistemic status of a claim (spec §11). FACT requires cited evidence."""
+
+    FACT = "fact"
+    ASSUMPTION = "assumption"
+    HYPOTHESIS = "hypothesis"
+    OPINION = "opinion"
+    INFERENCE = "inference"
+    UNVERIFIED = "unverified"
+
+
+class ClaimVerdict(str, Enum):
+    """Skeptic verdict vocabulary (approved plan; Verifier's vocabulary differs)."""
+
+    SUPPORTED = "supported"
+    REFUTED = "refuted"
+    UNVERIFIABLE = "unverifiable"
+
+
+class Evidence(BaseModel):
+    """A single piece of cited support. `source` is mandatory."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    source: str = Field(min_length=1)
+    quote: str | None = None
+
+    @model_validator(mode="after")
+    def _source_not_blank(self) -> "Evidence":
+        if not self.source.strip():
+            raise ValueError("source must be non-empty")
+        return self
+
+
 class Claim(BaseModel):
-    """Minimal claim; Phase 3 extends with evidence[] and status."""
+    """An ID-addressable claim with epistemic status and evidence.
+
+    `id` is assigned by our code (c1..cN), never by the model.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
     id: str = Field(min_length=1)
     statement: str = Field(min_length=1)
+    status: ClaimStatus = ClaimStatus.UNVERIFIED
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
+    evidence: list[Evidence] = Field(default_factory=list)
+
+
+class Verdict(BaseModel):
+    """Skeptic evaluation of exactly one supplied claim."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claim_id: str = Field(min_length=1)
+    verdict: ClaimVerdict
+    objection: str = Field(min_length=1)
+    evidence: list[Evidence] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _objection_not_blank(self) -> "Verdict":
+        if not self.objection.strip():
+            raise ValueError("objection must be non-empty")
+        return self
 
 
 class AgentMessage(BaseModel):
     """The unified agent-to-agent message envelope.
 
-    `confidence`, `claims`, and `round` are reserved fields: Phase 2 always
-    sends them as None; Phases 3 and 5 populate them.
+    Claims-kind outputs populate `claims`; verdicts-kind outputs populate
+    `verdicts` (never both). `confidence` is reserved and intentionally not
+    populated in Phase 3: per-claim confidence is authoritative.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -67,6 +128,7 @@ class AgentMessage(BaseModel):
     type: MessageType
     content: str = ""
     claims: list[Claim] | None = None
+    verdicts: list[Verdict] | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     tool_calls: list[ToolCall] | None = None
     round: int | None = Field(default=None, ge=1)

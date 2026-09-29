@@ -1,6 +1,7 @@
 """Ideator role definition."""
 
 from app.agents.base import AgentConfig
+from app.agents.structured import OutputKind
 from app.schemas import AgentRole, MessageType
 
 INSTRUCTIONS = """\
@@ -36,4 +37,5 @@ CONFIG = AgentConfig(
     instructions=INSTRUCTIONS,
     temperature=0.4,
     output_type=MessageType.IDEA,
+    output_kind=OutputKind.CLAIMS,
 )

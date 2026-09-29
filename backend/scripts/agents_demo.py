@@ -4,6 +4,11 @@
 NO ORCHESTRATION: every agent gets the same task and no other agent's output.
 This demonstrates independent reasoning (spec §5), not a pipeline.
 
+Phase 3 note: the Skeptic's output kind is verdicts, which requires input
+claims. Since there is no orchestrator yet, the demo derives ONE premise
+claim from the task itself (it is never another agent's output). Phase 4
+replaces this with real researcher claims.
+
 Usage (from backend/):
   python scripts/agents_demo.py "Should a small team adopt AI-assisted code review?"
   python scripts/agents_demo.py "..." --agents researcher skeptic --json
@@ -23,9 +28,20 @@ from app import logging_config  # noqa: E402
 from app.agents import build_registry  # noqa: E402
 from app.config import get_settings  # noqa: E402
 from app.llm import LLMError, get_provider  # noqa: E402
-from app.schemas import AgentRole  # noqa: E402
+from app.schemas import AgentRole, Claim, ClaimStatus  # noqa: E402
 
 ROLE_ORDER = [AgentRole.MANAGER, AgentRole.RESEARCHER, AgentRole.IDEATOR, AgentRole.SKEPTIC]
+
+
+def _premise_claim(task: str) -> Claim:
+    """Deterministic demo input for the Skeptic; not derived from any agent."""
+    return Claim(
+        id="c1",
+        statement=f"The task is answerable as stated: {task}",
+        status=ClaimStatus.UNVERIFIED,
+        confidence=None,
+        evidence=[],
+    )
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -43,9 +59,17 @@ async def run(args: argparse.Namespace) -> int:
 
         for role in roles:
             agent = registry.get(role)
+            run_kwargs = {}
+            if role is AgentRole.SKEPTIC:
+                run_kwargs["claims"] = [_premise_claim(args.task)]
+                print(
+                    "NOTE: no orchestrator yet — the Skeptic evaluates a single "
+                    "task-premise claim (Phase 4 wires in researcher claims).\n",
+                    file=sys.stderr,
+                )
             started = time.monotonic()
             try:
-                message = await agent.run(args.task)
+                message = await agent.run(args.task, **run_kwargs)
             except LLMError as exc:
                 print(f"[{agent.display_name}] ERROR {type(exc).__name__}: {exc}",
                       file=sys.stderr)
@@ -61,9 +85,15 @@ async def run(args: argparse.Namespace) -> int:
             if args.json:
                 print(message.model_dump_json())
             else:
+                if message.verdicts is not None:
+                    detail = f"{len(message.verdicts)} verdicts"
+                elif message.claims is not None:
+                    detail = f"{len(message.claims)} claims"
+                else:
+                    detail = "no structure"
                 print("=" * 70)
                 print(f"{agent.display_name.upper()}  ({message.type.value}, "
-                      f"{wall_s:.1f}s, {len(message.content)} chars)")
+                      f"{wall_s:.1f}s, {len(message.content)} chars, {detail})")
                 print("=" * 70)
                 print(message.content.strip())
                 print()

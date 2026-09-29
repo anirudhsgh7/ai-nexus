@@ -7,7 +7,7 @@ import pytest
 from app.agents.base import Agent, AgentConfig, format_user_content
 from app.agents.errors import EmptyAgentResponseError
 from app.llm.base import ChatRole, ProviderUnavailableError, ToolCall
-from app.schemas import AgentRole, MessageType
+from app.schemas import AgentRole, Claim, MessageType
 from tests.fakes import FakeProvider
 
 
@@ -37,6 +37,35 @@ def test_format_task_and_context():
 def test_format_blank_context_omitted():
     assert format_user_content("x", "   ") == "TASK:\nx"
     assert format_user_content("x", None) == "TASK:\nx"
+
+
+# ------------------------------------------------- Phase 3 claims framing
+
+def _claim(cid: str = "c1", statement: str = "X grew 40%") -> "Claim":
+    return Claim(id=cid, statement=statement)
+
+
+def test_format_task_with_claims_block():
+    out = format_user_content("Evaluate these", claims=[_claim()])
+    assert out == (
+        "TASK:\nEvaluate these\n\n"
+        "CLAIMS TO EVALUATE:\n"
+        "[c1] status=unverified confidence=none\n"
+        "Claim: X grew 40%\n"
+        "Evidence: none"
+    )
+
+
+def test_format_all_three_blocks_order():
+    out = format_user_content("t", "ctx", [_claim()])
+    assert out.index("TASK:") < out.index("CONTEXT:") < out.index("CLAIMS TO EVALUATE:")
+    blocks = out.split("\n\n")
+    assert [b.split("\n")[0] for b in blocks] == ["TASK:", "CONTEXT:", "CLAIMS TO EVALUATE:"]
+
+
+def test_format_empty_or_none_claims_omitted():
+    assert format_user_content("t", claims=[]) == "TASK:\nt"
+    assert format_user_content("t", claims=None) == "TASK:\nt"
 
 
 # ------------------------------------------------------------ config validation

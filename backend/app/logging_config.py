@@ -62,3 +62,7 @@ def agent_run_end(logger: logging.Logger, **fields: Any) -> None:
 
 def agent_run_error(logger: logging.Logger, **fields: Any) -> None:
     logger.error("agent_run_error %s", _kv(**fields))
+
+
+def agent_structured_retry(logger: logging.Logger, **fields: Any) -> None:
+    logger.warning("agent_structured_retry %s", _kv(**fields))

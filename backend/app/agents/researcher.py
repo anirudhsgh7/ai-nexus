@@ -1,6 +1,7 @@
 """Researcher role definition."""
 
 from app.agents.base import AgentConfig
+from app.agents.structured import OutputKind
 from app.schemas import AgentRole, MessageType
 
 INSTRUCTIONS = """\
@@ -36,4 +37,5 @@ CONFIG = AgentConfig(
     instructions=INSTRUCTIONS,
     temperature=0.2,
     output_type=MessageType.FINDING,
+    output_kind=OutputKind.CLAIMS,
 )

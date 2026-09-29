@@ -1,6 +1,7 @@
 """Skeptic role definition. Adversarial verification, not agreement."""
 
 from app.agents.base import AgentConfig
+from app.agents.structured import OutputKind
 from app.schemas import AgentRole, MessageType
 
 INSTRUCTIONS = """\
@@ -41,4 +42,5 @@ CONFIG = AgentConfig(
     instructions=INSTRUCTIONS,
     temperature=0.0,
     output_type=MessageType.CRITIQUE,
+    output_kind=OutputKind.VERDICTS,
 )
