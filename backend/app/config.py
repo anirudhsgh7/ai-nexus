@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     fallback_model: str = "qwen2.5:7b-instruct"
 
     num_ctx: int = Field(default=8192, ge=2048, le=32768)
+    max_rounds: int = Field(default=3, ge=1, le=5)
     keep_alive: str = "30m"
     request_timeout_s: float = Field(default=300.0, gt=0)
     connect_timeout_s: float = Field(default=5.0, gt=0)

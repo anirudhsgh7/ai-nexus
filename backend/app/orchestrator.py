@@ -1,9 +1,14 @@
-"""Fixed 5-step pipeline: plan -> research || ideate -> critique -> synthesize.
+"""Iterative orchestration: Manager routing, revision rounds, deterministic stops.
 
-Phase 4 is deliberately linear. The independence guarantee is structural:
-Researcher and Ideator receive the same plan context and neither receives the
-other's output; the Skeptic receives only re-identified claim records. Phase 5
-replaces the step selection while keeping step mechanics, events, and errors.
+Phase 5 replaces Phase 4's fixed pipeline with a bounded loop. Three locks:
+
+- The Manager is a *router*: it emits grammar-constrained `ManagerDecision`
+  JSON executed by Python, never prose, and it only ever sees the bounded
+  registry summary — never worker prose.
+- Stop conditions are deterministic: zero unresolved finishes with no decision
+  call at all; MAX_ROUNDS, repeated-decision, no-progress, and step caps force
+  finish visibly (synthetic skipped DECIDE step + `guard_triggered` log).
+- Synthesis uses the **best round** (net evidence score), not the last.
 """
 
 from __future__ import annotations
@@ -17,8 +22,10 @@ from datetime import UTC, datetime
 from typing import Any
 
 from app.agents import AgentRegistry
+from app.agents.structured import OutputKind, normalize_decision
 from app.runs import (
     ErrorInfo,
+    RoundSnapshot,
     RunEventType,
     RunManager,
     RunRecord,
@@ -27,30 +34,47 @@ from app.runs import (
     StepRecord,
     StepStatus,
 )
-from app.schemas import AgentMessage, AgentRole, Claim, MessageType, Verdict
+from app.schemas import (
+    AgentMessage,
+    AgentRole,
+    Claim,
+    ClaimVerdict,
+    DecisionAction,
+    ManagerDecision,
+    MessageType,
+    Verdict,
+)
 
 logger = logging.getLogger("ai_nexus.orchestrator")
 
 __all__ = [
-    "PIPELINE",
+    "MAX_TOTAL_STEPS",
     "ClaimOrigin",
     "Orchestrator",
+    "PoolState",
     "QualifiedClaim",
+    "ROUND_ONE_STEPS",
     "qualify_claims",
+    "render_decision_summary",
     "render_evidence_board",
+    "render_iteration_history",
+    "render_revision_context",
     "render_synthesis_context",
     "resolve_claim",
+    "select_best_round",
 ]
 
-PIPELINE: tuple[tuple[StepKind, AgentRole], ...] = (
-    (StepKind.PLAN, AgentRole.MANAGER),
+ROUND_ONE_STEPS: tuple[tuple[StepKind, AgentRole], ...] = (
     (StepKind.RESEARCH, AgentRole.RESEARCHER),
     (StepKind.IDEATE, AgentRole.IDEATOR),
-    (StepKind.CRITIQUE, AgentRole.SKEPTIC),
-    (StepKind.SYNTHESIZE, AgentRole.MANAGER),
 )
 
+MAX_TOTAL_STEPS = 16          # bug insurance above the MAX_ROUNDS bound
+MAX_SUMMARY_ENTRIES = 10      # decision-context entry cap (PRD §6.7)
+CLIP_CHARS = 200              # per-field clipping in the decision context
+
 _SKIPPED_CRITIQUE_NOTE = "(skipped: no claims were produced to evaluate)"
+_WORKERS: tuple[AgentRole, ...] = (AgentRole.RESEARCHER, AgentRole.IDEATOR)
 
 
 # ---------------------------------------------------------------- claim mapping
@@ -70,14 +94,16 @@ class QualifiedClaim:
 
 def qualify_claims(
     batches: Sequence[tuple[AgentRole, Sequence[Claim]]],
+    *,
+    start: int = 1,
 ) -> list[QualifiedClaim]:
-    """Deterministic run-level re-identification c1..cK in batch order.
+    """Deterministic run-level re-identification c{start}..c{start+N-1}.
 
-    Claims are copied with new ids; origins keep (agent, original_id) so
-    verdicts referencing run-level ids can be mapped back for display.
+    Claim ordering and origins are preserved so verdicts referencing run-level
+    ids map back to (agent, original id).
     """
     qualified: list[QualifiedClaim] = []
-    counter = 0
+    counter = start - 1
     for agent, claims in batches:
         for claim in claims:
             counter += 1
@@ -105,6 +131,113 @@ def resolve_claim(
     return None
 
 
+def _normalize_statement(statement: str) -> str:
+    return " ".join(statement.split()).lower()
+
+
+def _normalize_instruction(instruction: str) -> str:
+    return " ".join(instruction.split()).lower()
+
+
+# ---------------------------------------------------------------- pool state
+
+
+class PoolState:
+    """Active claim pool with verdicts and continuing run-level IDs (PRD §6.5)."""
+
+    def __init__(self) -> None:
+        self.claims: list[QualifiedClaim] = []
+        self.verdicts: dict[str, Verdict] = {}
+        self.counter = 0
+
+    def _is_supported(self, item: QualifiedClaim) -> bool:
+        verdict = self.verdicts.get(item.claim.id)
+        return verdict is not None and verdict.verdict is ClaimVerdict.SUPPORTED
+
+    def _append(
+        self, agent: AgentRole, claims: Sequence[Claim] | None
+    ) -> list[QualifiedClaim]:
+        """Add claims with fresh IDs; dedupe by normalized statement (PRD §6.5-3)."""
+        active_statements = {
+            _normalize_statement(item.claim.statement) for item in self.claims
+        }
+        added: list[QualifiedClaim] = []
+        for claim in claims or []:
+            normalized = _normalize_statement(claim.statement)
+            if normalized in active_statements:
+                logger.debug(
+                    "pool_dedupe agent=%s statement=%.80s", agent.value, claim.statement
+                )
+                continue
+            active_statements.add(normalized)
+            self.counter += 1
+            added.append(
+                QualifiedClaim(
+                    claim=Claim(
+                        id=f"c{self.counter}",
+                        statement=claim.statement,
+                        status=claim.status,
+                        confidence=claim.confidence,
+                        evidence=list(claim.evidence),
+                    ),
+                    origin=ClaimOrigin(agent=agent, original_id=claim.id),
+                )
+            )
+        self.claims.extend(added)
+        return added
+
+    def add(
+        self, agent: AgentRole, claims: Sequence[Claim] | None
+    ) -> list[QualifiedClaim]:
+        """Round-1 intake (also dedupes cross-agent duplicates)."""
+        return self._append(agent, claims)
+
+    def apply_revision(
+        self, agent: AgentRole, revision_claims: Sequence[Claim] | None
+    ) -> tuple[list[QualifiedClaim], list[QualifiedClaim]]:
+        """Revision rule: keep the agent's SUPPORTED claims, drop its unresolved
+        ones (and their verdicts), append deduplicated new claims (PRD §6.5)."""
+        dropped = [
+            item for item in self.claims
+            if item.origin.agent is agent and not self._is_supported(item)
+        ]
+        if dropped:
+            self.claims = [
+                item for item in self.claims
+                if not (item.origin.agent is agent and not self._is_supported(item))
+            ]
+            for item in dropped:
+                self.verdicts.pop(item.claim.id, None)
+        added = self._append(agent, revision_claims)
+        return added, dropped
+
+    def by_agent(self, agent: AgentRole) -> list[QualifiedClaim]:
+        return [item for item in self.claims if item.origin.agent is agent]
+
+    def active_claims(self) -> list[Claim]:
+        return [item.claim for item in self.claims]
+
+    def record_verdicts(self, verdicts: Sequence[Verdict] | None) -> None:
+        for verdict in verdicts or []:
+            self.verdicts[verdict.claim_id] = verdict
+
+    def verdicts_for(self, items: Sequence[QualifiedClaim]) -> list[Verdict]:
+        return [
+            self.verdicts[item.claim.id]
+            for item in items
+            if item.claim.id in self.verdicts
+        ]
+
+    def applicable_verdicts(self) -> list[Verdict]:
+        return self.verdicts_for(self.claims)
+
+    def unresolved(self) -> list[QualifiedClaim]:
+        return [item for item in self.claims if not self._is_supported(item)]
+
+    def supported_count(self) -> int:
+        return sum(1 for item in self.claims if self._is_supported(item))
+
+
 # ---------------------------------------------------------------- rendering
 
 
@@ -122,7 +255,7 @@ def _render_evidence_lines(claim: Claim) -> list[str]:
 def render_evidence_board(
     qualified: Sequence[QualifiedClaim], verdicts: Sequence[Verdict]
 ) -> str:
-    """Golden claim+verdict view shared by synthesis (and Phase 5 replanning)."""
+    """Golden claim+verdict view shared by revision contexts and synthesis."""
     by_id = {v.claim_id: v for v in verdicts}
     blocks: list[str] = []
     for item in qualified:
@@ -149,7 +282,7 @@ def render_synthesis_context(
     skeptic_content: str | None,
     board: str,
 ) -> str:
-    """Canonical Manager synthesis context (PRD §6.4)."""
+    """Canonical Manager synthesis context (Phase 4 §6.4, unchanged)."""
     skeptic_body = (
         skeptic_content if skeptic_content is not None else _SKIPPED_CRITIQUE_NOTE
     )
@@ -159,6 +292,132 @@ def render_synthesis_context(
         f"IDEATOR OPTIONS:\n{ideator_content}\n\n"
         f"SKEPTIC CRITIQUE:\n{skeptic_body}\n\n"
         f"EVALUATED CLAIMS:\n{board_body}"
+    )
+
+
+def _clip(text: str, limit: int = CLIP_CHARS) -> str:
+    return text if len(text) <= limit else text[:limit] + "..."
+
+
+def render_decision_summary(
+    round_number: int,
+    max_rounds: int,
+    active: Sequence[QualifiedClaim],
+    verdicts: dict[str, Verdict],
+    previous_decision: ManagerDecision | None = None,
+) -> str:
+    """Bounded registry summary — the ONLY thing the Manager sees to route.
+
+    Contains claim records and verdicts; never worker prose (PRD §6.7).
+    """
+    blocks = [f"ROUND {round_number} OF {max_rounds}"]
+
+    if previous_decision is not None:
+        target = (
+            previous_decision.target.value
+            if previous_decision.target
+            else "agent"
+        )
+        blocks.append(
+            f"PREVIOUS INSTRUCTION:\n{target}: "
+            f"{_clip(previous_decision.instruction)}"
+        )
+
+    status_lines = ["AGENT STATUS:"]
+    for agent in _WORKERS:
+        owned = [item for item in active if item.origin.agent is agent]
+        supported = sum(
+            1 for item in owned
+            if item.claim.id in verdicts
+            and verdicts[item.claim.id].verdict is ClaimVerdict.SUPPORTED
+        )
+        status_lines.append(
+            f"- {agent.value}: {len(owned)} claims "
+            f"({supported} supported, {len(owned) - supported} unresolved)"
+        )
+    blocks.append("\n".join(status_lines))
+
+    unresolved = [
+        item for item in active
+        if item.claim.id not in verdicts
+        or verdicts[item.claim.id].verdict is not ClaimVerdict.SUPPORTED
+    ]
+    if not unresolved:
+        blocks.append("UNRESOLVED CLAIMS:\n(none)")
+    else:
+        entry_lines = ["UNRESOLVED CLAIMS:"]
+        shown = unresolved[:MAX_SUMMARY_ENTRIES]
+        for item in shown:
+            verdict = verdicts.get(item.claim.id)
+            verdict_value = verdict.verdict.value if verdict else "none"
+            objection = _clip(verdict.objection) if verdict else "none"
+            entry_lines.append(
+                f"[{item.claim.id}] ({item.origin.agent.value}) "
+                f"verdict={verdict_value}"
+            )
+            entry_lines.append(f"  Claim: {_clip(item.claim.statement)}")
+            entry_lines.append(f"  Objection: {objection}")
+        if len(unresolved) > MAX_SUMMARY_ENTRIES:
+            entry_lines.append(
+                f"... and {len(unresolved) - MAX_SUMMARY_ENTRIES} more unresolved claims"
+            )
+        blocks.append("\n".join(entry_lines))
+
+    return "\n\n".join(blocks)
+
+
+def render_revision_context(instruction: str, board: str) -> str:
+    """Target worker's context: manager instruction + own claims only (PRD §6.7)."""
+    return (
+        f"MANAGER INSTRUCTION:\n{instruction}\n\n"
+        f"YOUR CURRENT CLAIMS AND THEIR VERDICTS:\n{board or '(none)'}"
+    )
+
+
+def render_iteration_history(
+    snapshots: Sequence[RoundSnapshot], selected: RoundSnapshot
+) -> str:
+    """Minority-report section appended to synthesis: rounds + remaining unresolved."""
+    lines = ["ITERATION HISTORY:"]
+    for snapshot in snapshots:
+        lines.append(
+            f"- round {snapshot.round_number}: {snapshot.supported_count} supported, "
+            f"{snapshot.unresolved_count} unresolved"
+        )
+    score = selected.supported_count - selected.unresolved_count
+    lines.append(
+        f"Selected round: {selected.round_number} (net evidence score {score})"
+    )
+
+    applicable = {v.claim_id: v for v in selected.verdicts}
+    remaining = [
+        claim for claim in selected.claims
+        if claim.id not in applicable
+        or applicable[claim.id].verdict is not ClaimVerdict.SUPPORTED
+    ]
+    lines.append("")
+    lines.append("REMAINING UNRESOLVED:")
+    if not remaining:
+        lines.append("(none)")
+    else:
+        for claim in remaining:
+            verdict = applicable.get(claim.id)
+            verdict_value = verdict.verdict.value if verdict else "none"
+            origin = selected.origins.get(claim.id)
+            origin_value = origin.value if origin else "?"
+            lines.append(f"[{claim.id}] ({origin_value}) verdict={verdict_value}")
+    return "\n".join(lines)
+
+
+def select_best_round(snapshots: Sequence[RoundSnapshot]) -> RoundSnapshot:
+    """Net evidence score first (supported - unresolved), later round on ties.
+
+    Empty rounds score 0 and cannot beat a net-positive round (PRD §6.6).
+    """
+    return max(
+        snapshots,
+        key=lambda snap: (snap.supported_count - snap.unresolved_count,
+                          snap.round_number),
     )
 
 
@@ -173,12 +432,33 @@ def _error_info(exc: Exception) -> ErrorInfo:
     )
 
 
-class Orchestrator:
-    """Executes the fixed pipeline and publishes run events (PRD §6.5)."""
+def _same_decision(a: ManagerDecision, b: ManagerDecision) -> bool:
+    return (
+        a.action is b.action
+        and a.target is b.target
+        and _normalize_instruction(a.instruction)
+        == _normalize_instruction(b.instruction)
+    )
 
-    def __init__(self, registry: AgentRegistry, store: RunManager) -> None:
+
+class Orchestrator:
+    """Executes the iterative pipeline and publishes run events (PRD §6.6)."""
+
+    def __init__(
+        self, registry: AgentRegistry, store: RunManager, *,
+        max_rounds: int | None = None,
+    ) -> None:
+        if max_rounds is None:
+            # Resolved from Settings here so the frozen lifespan wiring stays
+            # untouched while AI_NEXUS_MAX_ROUNDS still governs API runs.
+            from app.config import get_settings
+
+            max_rounds = get_settings().max_rounds
+        if max_rounds < 1:
+            raise ValueError("max_rounds must be >= 1")
         self._registry = registry
         self._store = store
+        self._max_rounds = max_rounds
 
     async def execute(self, run_id: str) -> None:
         run = self._store.get(run_id)
@@ -188,6 +468,11 @@ class Orchestrator:
         researcher = self._registry.get(AgentRole.RESEARCHER)
         ideator = self._registry.get(AgentRole.IDEATOR)
         skeptic = self._registry.get(AgentRole.SKEPTIC)
+
+        pool = PoolState()
+        worker_content: dict[AgentRole, str] = {}
+        skeptic_content: str | None = None
+        previous_decision: ManagerDecision | None = None
 
         try:
             run.started_at = datetime.now(UTC)
@@ -199,49 +484,158 @@ class Orchestrator:
 
             plan = await self._step(
                 run, StepKind.PLAN, AgentRole.MANAGER,
-                lambda: manager.run(task_text),
+                lambda: manager.run(task_text), round_=None,
             )
+
+            # ---- round 1 (fixed participation, Phase 4 compatibility) ----
             research = await self._step(
                 run, StepKind.RESEARCH, AgentRole.RESEARCHER,
                 lambda: researcher.run(task_text, context=plan.content),
+                round_=1,
             )
+            pool.add(AgentRole.RESEARCHER, research.claims)
+            worker_content[AgentRole.RESEARCHER] = research.content
+
             ideation = await self._step(
                 run, StepKind.IDEATE, AgentRole.IDEATOR,
                 lambda: ideator.run(task_text, context=plan.content),
+                round_=1,
             )
+            pool.add(AgentRole.IDEATOR, ideation.claims)
+            worker_content[AgentRole.IDEATOR] = ideation.content
 
-            qualified = qualify_claims(
-                [
-                    (AgentRole.RESEARCHER, research.claims or []),
-                    (AgentRole.IDEATOR, ideation.claims or []),
-                ]
-            )
-            critique: AgentMessage | None
-            if qualified:
+            if pool.claims:
                 critique = await self._step(
                     run, StepKind.CRITIQUE, AgentRole.SKEPTIC,
-                    lambda: skeptic.run(
-                        task_text, claims=[q.claim for q in qualified]
-                    ),
+                    lambda: skeptic.run(task_text, claims=pool.active_claims()),
+                    round_=1,
                 )
+                pool.record_verdicts(critique.verdicts)
+                skeptic_content = critique.content
             else:
-                critique = None
-                self._mark_skipped(run, StepKind.CRITIQUE, AgentRole.SKEPTIC)
+                self._mark_skipped(run, StepKind.CRITIQUE, AgentRole.SKEPTIC,
+                                   round_=1)
 
-            board = render_evidence_board(
-                qualified, critique.verdicts or [] if critique else []
+            rounds = 1
+            run.rounds.append(
+                self._snapshot(rounds, pool, worker_content, skeptic_content)
             )
-            context = render_synthesis_context(
-                research.content,
-                ideation.content,
-                critique.content if critique else None,
-                board,
+
+            # ---- iteration loop ----
+            while True:
+                if not pool.unresolved():
+                    break  # deterministic finish; no decision call (PRD §6.6)
+                if rounds >= self._max_rounds:
+                    self._forced_finish(
+                        run, f"round cap reached (max_rounds={self._max_rounds})",
+                        rounds,
+                    )
+                    break
+                if len(run.steps) >= MAX_TOTAL_STEPS:
+                    self._forced_finish(run, "step cap reached", rounds)
+                    break
+
+                summary = render_decision_summary(
+                    rounds, self._max_rounds, pool.claims, pool.verdicts,
+                    previous_decision,
+                )
+                decision_msg = await self._step(
+                    run, StepKind.DECIDE, AgentRole.MANAGER,
+                    lambda: manager.run(
+                        task_text,
+                        context=summary,
+                        message_type=MessageType.DECISION,
+                        output_kind=OutputKind.DECISION,
+                    ),
+                    round_=rounds,
+                )
+                if decision_msg.decision is None:  # defensive; parse guarantees
+                    self._forced_finish(run, "decision missing", rounds)
+                    break
+                decision = normalize_decision(decision_msg.decision)
+                run.rounds[-1].decision = decision
+
+                if decision.action is DecisionAction.FINISH:
+                    break
+                if previous_decision is not None and _same_decision(
+                    previous_decision, decision
+                ):
+                    self._forced_finish(run, "repeated decision", rounds)
+                    break
+                previous_decision = decision
+
+                target = decision.target
+                assert target in _WORKERS  # enforced by ManagerDecision validator
+                own_board = render_evidence_board(
+                    pool.by_agent(target), pool.verdicts_for(pool.by_agent(target))
+                )
+                revision_context = render_revision_context(
+                    decision.instruction, own_board
+                )
+                revision = await self._step(
+                    run, StepKind.REVISE, target,
+                    lambda: self._registry.get(target).run(
+                        task_text,
+                        context=revision_context,
+                        message_type=MessageType.REVISION,
+                    ),
+                    round_=rounds + 1,
+                )
+                added, dropped = pool.apply_revision(target, revision.claims)
+                worker_content[target] = revision.content
+
+                if not added and not dropped:
+                    self._forced_finish(
+                        run, "revision produced no progress", rounds
+                    )
+                    break
+
+                next_round = rounds + 1
+                if added:
+                    critique = await self._step(
+                        run, StepKind.CRITIQUE, AgentRole.SKEPTIC,
+                        lambda: skeptic.run(
+                            task_text, claims=[q.claim for q in added]
+                        ),
+                        round_=next_round,
+                    )
+                    pool.record_verdicts(critique.verdicts)
+                    skeptic_content = critique.content
+                rounds = next_round
+                run.rounds.append(
+                    self._snapshot(rounds, pool, worker_content, skeptic_content)
+                )
+
+            # ---- synthesis from the best round ----
+            best = select_best_round(run.rounds)
+            best_board = render_evidence_board(
+                [
+                    QualifiedClaim(
+                        claim=claim,
+                        origin=ClaimOrigin(
+                            agent=best.origins[claim.id], original_id=claim.id
+                        ),
+                    )
+                    for claim in best.claims
+                ],
+                best.verdicts,
+            )
+            context = (
+                render_synthesis_context(
+                    best.worker_content.get(AgentRole.RESEARCHER, ""),
+                    best.worker_content.get(AgentRole.IDEATOR, ""),
+                    best.skeptic_content or None,
+                    best_board,
+                )
+                + "\n\n"
+                + render_iteration_history(run.rounds, best)
             )
             final = await self._step(
                 run, StepKind.SYNTHESIZE, AgentRole.MANAGER,
                 lambda: manager.run(
                     task_text, context=context, message_type=MessageType.SYNTHESIS
                 ),
+                round_=None,
             )
 
             run.final_message = final
@@ -288,6 +682,7 @@ class Orchestrator:
                 step=failed.index if failed else None,
                 kind=failed.kind if failed else None,
                 agent=failed.agent if failed else None,
+                round=failed.round if failed else None,
                 error=run.error,
                 duration_ms=run.duration_ms,
             )
@@ -300,6 +695,8 @@ class Orchestrator:
         kind: StepKind,
         agent: AgentRole,
         call: Callable[[], Coroutine[Any, Any, AgentMessage]],
+        *,
+        round_: int | None,
     ) -> AgentMessage:
         index = len(run.steps) + 1
         record = StepRecord(
@@ -308,10 +705,12 @@ class Orchestrator:
             agent=agent,
             status=StepStatus.RUNNING,
             started_at=datetime.now(UTC),
+            round=round_,
         )
         run.steps.append(record)
         self._store.append_event(
-            run.id, RunEventType.STEP_STARTED, step=index, kind=kind, agent=agent
+            run.id, RunEventType.STEP_STARTED, step=index, kind=kind,
+            agent=agent, round=round_,
         )
         started = time.monotonic()
         try:
@@ -325,35 +724,75 @@ class Orchestrator:
         record.duration_ms = round((time.monotonic() - started) * 1000, 1)
         record.message = message
         self._store.append_event(
-            run.id,
-            RunEventType.STEP_COMPLETED,
-            step=index,
-            kind=kind,
-            agent=agent,
-            duration_ms=record.duration_ms,
+            run.id, RunEventType.STEP_COMPLETED, step=index, kind=kind,
+            agent=agent, round=round_, duration_ms=record.duration_ms,
             message=message,
         )
         return message
 
-    def _mark_skipped(self, run: RunRecord, kind: StepKind, agent: AgentRole) -> None:
+    def _mark_skipped(
+        self, run: RunRecord, kind: StepKind, agent: AgentRole, *,
+        round_: int | None,
+    ) -> None:
         index = len(run.steps) + 1
         run.steps.append(
             StepRecord(
-                index=index,
-                kind=kind,
-                agent=agent,
+                index=index, kind=kind, agent=agent,
                 status=StepStatus.SKIPPED,
                 started_at=datetime.now(UTC),
-                duration_ms=0.0,
-                skipped=True,
+                duration_ms=0.0, skipped=True, round=round_,
             )
         )
         self._store.append_event(
-            run.id,
-            RunEventType.STEP_COMPLETED,
-            step=index,
-            kind=kind,
-            agent=agent,
-            duration_ms=0.0,
-            skipped=True,
+            run.id, RunEventType.STEP_COMPLETED, step=index, kind=kind,
+            agent=agent, round=round_, duration_ms=0.0, skipped=True,
+        )
+
+    def _forced_finish(self, run: RunRecord, reason: str, round_: int) -> None:
+        """Visible guard stop: synthetic skipped DECIDE step (PRD §6.6)."""
+        logger.warning(
+            "guard_triggered run=%s guard=%s round=%s", run.id, reason, round_
+        )
+        decision = ManagerDecision(
+            action=DecisionAction.FINISH, reason=reason, confidence=0.0
+        )
+        message = AgentMessage(
+            from_agent=AgentRole.MANAGER,
+            type=MessageType.DECISION,
+            content="",
+            decision=decision,
+        )
+        index = len(run.steps) + 1
+        run.steps.append(
+            StepRecord(
+                index=index, kind=StepKind.DECIDE, agent=AgentRole.MANAGER,
+                status=StepStatus.SKIPPED,
+                started_at=datetime.now(UTC),
+                duration_ms=0.0, message=message, skipped=True, round=round_,
+            )
+        )
+        self._store.append_event(
+            run.id, RunEventType.STEP_COMPLETED, step=index,
+            kind=StepKind.DECIDE, agent=AgentRole.MANAGER, round=round_,
+            duration_ms=0.0, skipped=True, message=message,
+        )
+
+    @staticmethod
+    def _snapshot(
+        round_number: int,
+        pool: PoolState,
+        worker_content: dict[AgentRole, str],
+        skeptic_content: str | None,
+    ) -> RoundSnapshot:
+        return RoundSnapshot(
+            round_number=round_number,
+            claims=pool.active_claims(),
+            origins={
+                item.claim.id: item.origin.agent for item in pool.claims
+            },
+            verdicts=pool.applicable_verdicts(),
+            worker_content=dict(worker_content),
+            skeptic_content=skeptic_content or "",
+            supported_count=pool.supported_count(),
+            unresolved_count=len(pool.unresolved()),
         )

@@ -12,7 +12,9 @@ from app.schemas import (
     Claim,
     ClaimStatus,
     ClaimVerdict,
+    DecisionAction,
     Evidence,
+    ManagerDecision,
     MessageType,
     Verdict,
 )
@@ -54,7 +56,8 @@ def test_wire_field_names():
     data = json.loads(_msg().model_dump_json())
     assert set(data) == {
         "id", "from_agent", "to_agent", "type", "content", "claims",
-        "verdicts", "confidence", "tool_calls", "round", "created_at",
+        "verdicts", "decision", "confidence", "tool_calls", "round",
+        "created_at",
     }
     assert data["from_agent"] == "researcher"
     assert data["type"] == "finding"
@@ -102,7 +105,7 @@ def test_invalid_role_and_type_rejected():
     with pytest.raises(ValidationError):
         _msg(from_agent="verifier")
     with pytest.raises(ValidationError):
-        _msg(type="decision")
+        _msg(type="summary")
 
 
 def test_extra_fields_rejected():
@@ -205,3 +208,47 @@ def test_message_with_verdicts_round_trip():
     again = AgentMessage.model_validate_json(m.model_dump_json())
     assert again == m
     assert again.verdicts[0].verdict is ClaimVerdict.SUPPORTED
+
+
+# ------------------------------------------------- Phase 5 decision extensions
+
+def test_decision_call_agent_validation():
+    d = ManagerDecision(
+        action=DecisionAction.CALL_AGENT,
+        target=AgentRole.RESEARCHER,
+        instruction="Find a source for the 40% claim.",
+        reason="Evidence gap blocks support.",
+        confidence=0.8,
+    )
+    assert d.action is DecisionAction.CALL_AGENT
+    with pytest.raises(ValidationError):
+        ManagerDecision(action=DecisionAction.CALL_AGENT, target=AgentRole.SKEPTIC,
+                        instruction="x", reason="r", confidence=0.5)
+    with pytest.raises(ValidationError):
+        ManagerDecision(action=DecisionAction.CALL_AGENT, target=AgentRole.RESEARCHER,
+                        instruction="   ", reason="r", confidence=0.5)
+    with pytest.raises(ValidationError):
+        ManagerDecision(action=DecisionAction.CALL_AGENT, reason="r", confidence=0.5)
+
+
+def test_decision_finish_needs_no_target():
+    d = ManagerDecision(action=DecisionAction.FINISH, reason="All set.", confidence=0.7)
+    assert d.target is None and d.instruction == ""
+    with pytest.raises(ValidationError):
+        ManagerDecision(action=DecisionAction.FINISH, reason="   ", confidence=0.5)
+    with pytest.raises(ValidationError):
+        ManagerDecision(action=DecisionAction.FINISH, reason="r", confidence=1.5)
+
+
+def test_decision_round_trip_on_message():
+    decision = ManagerDecision(action=DecisionAction.FINISH, reason="done", confidence=0.9)
+    m = _msg(type=MessageType.DECISION, decision=decision, content="")
+    again = AgentMessage.model_validate_json(m.model_dump_json())
+    assert again == m
+    assert again.decision == decision
+    assert again.content == ""
+
+
+def test_message_type_members():
+    assert MessageType.DECISION.value == "decision"
+    assert MessageType.REVISION.value == "revision"

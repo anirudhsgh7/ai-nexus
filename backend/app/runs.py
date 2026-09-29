@@ -15,10 +15,11 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.schemas import AgentMessage, AgentRole
+from app.schemas import AgentMessage, AgentRole, Claim, ManagerDecision, Verdict
 
 __all__ = [
     "ErrorInfo",
+    "RoundSnapshot",
     "RunActiveError",
     "RunEvent",
     "RunEventType",
@@ -47,6 +48,8 @@ class StepKind(str, Enum):
     RESEARCH = "research"
     IDEATE = "ideate"
     CRITIQUE = "critique"
+    DECIDE = "decide"          # Phase 5
+    REVISE = "revise"          # Phase 5
     SYNTHESIZE = "synthesize"
 
 
@@ -88,6 +91,7 @@ class RunEvent(BaseModel):
     step: int | None = Field(default=None, ge=1)
     kind: StepKind | None = None
     agent: AgentRole | None = None
+    round: int | None = Field(default=None, ge=1)
     task: str | None = None
     message: AgentMessage | None = None
     duration_ms: float | None = None
@@ -106,6 +110,22 @@ class StepRecord:
     message: AgentMessage | None = None
     skipped: bool = False
     error: ErrorInfo | None = None
+    round: int | None = None
+
+
+@dataclass(slots=True)
+class RoundSnapshot:
+    """Evidence state at the end of one critique round (Phase 5 PRD §6.4)."""
+
+    round_number: int
+    claims: list[Claim]
+    origins: dict[str, AgentRole]
+    verdicts: list[Verdict]
+    worker_content: dict[AgentRole, str]
+    skeptic_content: str
+    supported_count: int
+    unresolved_count: int
+    decision: ManagerDecision | None = None
 
 
 @dataclass(slots=True)
@@ -120,6 +140,7 @@ class RunRecord:
     final_message: AgentMessage | None = None
     error: ErrorInfo | None = None
     events: list[RunEvent] = field(default_factory=list)
+    rounds: list[RoundSnapshot] = field(default_factory=list)
 
     @property
     def duration_ms(self) -> float | None:

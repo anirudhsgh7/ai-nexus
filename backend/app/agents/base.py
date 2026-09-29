@@ -25,6 +25,7 @@ from app.agents.structured import (
     correction_message,
     directive_for,
     parse_claims,
+    parse_decision,
     parse_verdicts,
     schema_for,
 )
@@ -128,11 +129,12 @@ class Agent:
         claims: Sequence[Claim] | None = None,
         message_type: MessageType | None = None,
         to_agent: AgentRole | None = None,
+        output_kind: OutputKind | None = None,
     ) -> AgentMessage:
         if not task.strip():
             raise ValueError("task must be non-empty")
         cfg = self._config
-        kind = cfg.output_kind
+        kind = output_kind if output_kind is not None else cfg.output_kind
         resolved_type = message_type or cfg.output_type
         input_claims = list(claims) if claims else []
 
@@ -196,8 +198,15 @@ class Agent:
         content = parsed.content if parsed is not None else result.content
         out_claims = parsed.claims if parsed is not None else None
         out_verdicts = parsed.verdicts if parsed is not None else None
+        out_decision = parsed.decision if parsed is not None else None
         tool_calls = result.tool_calls or None
-        if not content.strip() and not out_claims and not out_verdicts and not tool_calls:
+        if (
+            not content.strip()
+            and not out_claims
+            and not out_verdicts
+            and not out_decision
+            and not tool_calls
+        ):
             log.agent_run_error(
                 logger, agent=cfg.role.value,
                 error_type="EmptyAgentResponseError", message="no content, no tool calls",
@@ -212,6 +221,7 @@ class Agent:
             content=content,
             claims=out_claims,
             verdicts=out_verdicts,
+            decision=out_decision,
             confidence=None,
             tool_calls=tool_calls if kind is OutputKind.PLAIN else None,
             round=None,
@@ -273,9 +283,12 @@ class Agent:
                 if kind is OutputKind.CLAIMS:
                     parsed = parse_claims(result.content)
                     problems = validate_claims(parsed.claims or [])
-                else:
+                elif kind is OutputKind.VERDICTS:
                     parsed = parse_verdicts(result.content)
                     problems = validate_verdicts(input_claims, parsed.verdicts or [])
+                else:  # DECISION: coherence enforced by ManagerDecision validators
+                    parsed = parse_decision(result.content)
+                    problems = []
             except (ValueError, ValidationError) as exc:
                 parsed = None
                 problems = [f"{type(exc).__name__}: {str(exc)[:_RAW_ERROR_CHARS]}"]

@@ -15,16 +15,28 @@ from enum import Enum
 
 from pydantic import BaseModel, Field
 
-from app.schemas import Claim, ClaimStatus, ClaimVerdict, Evidence, Verdict
+from app.schemas import (
+    AgentRole,
+    Claim,
+    ClaimStatus,
+    ClaimVerdict,
+    DecisionAction,
+    Evidence,
+    ManagerDecision,
+    Verdict,
+)
 
 __all__ = [
+    "DECISION_SCHEMA",
     "DEFAULT_STRUCTURED_MAX_TOKENS",
     "OutputKind",
     "StructuredResult",
     "correction_message",
     "directive_for",
     "extract_json",
+    "normalize_decision",
     "parse_claims",
+    "parse_decision",
     "parse_verdicts",
     "schema_for",
 ]
@@ -38,6 +50,7 @@ class OutputKind(str, Enum):
     PLAIN = "plain"
     CLAIMS = "claims"
     VERDICTS = "verdicts"
+    DECISION = "decision"
 
 
 def _evidence_subschema() -> dict:
@@ -112,10 +125,30 @@ _VERDICTS_SENTENCE = (
     "evidence supports it."
 )
 
+DECISION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "action": {"type": "string", "enum": [a.value for a in DecisionAction]},
+        "target": {"type": "string", "enum": ["researcher", "ideator"]},
+        "instruction": {"type": "string"},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    },
+    "required": ["action", "reason", "confidence"],
+}
+
 _DIRECTIVE_HEADER = (
     "OUTPUT FORMAT (mandatory):\n"
     "Respond with a single JSON object and nothing else. No markdown, no commentary.\n"
     "The object must match this JSON schema exactly:\n"
+)
+
+_DECISION_BODY = (
+    "Ignore any earlier instructions about prose or sections; this call is a "
+    "routing decision only.\n"
+    'Use action="call_agent" with target "researcher" or "ideator" and a concrete '
+    "instruction when one more targeted work step is likely to resolve unresolved "
+    'claims; use action="finish" when synthesis should proceed now.'
 )
 
 
@@ -124,17 +157,22 @@ def schema_for(kind: OutputKind) -> dict | None:
         return CLAIMS_SCHEMA
     if kind is OutputKind.VERDICTS:
         return VERDICTS_SCHEMA
+    if kind is OutputKind.DECISION:
+        return DECISION_SCHEMA
     return None
 
 
 def directive_for(kind: OutputKind) -> str:
-    if kind not in (OutputKind.CLAIMS, OutputKind.VERDICTS):
+    if kind is OutputKind.PLAIN:
         return ""
     schema = schema_for(kind)
-    sentence = _CLAIMS_SENTENCE if kind is OutputKind.CLAIMS else _VERDICTS_SENTENCE
+    if kind is OutputKind.DECISION:
+        body = _DECISION_BODY
+    else:
+        sentence = _CLAIMS_SENTENCE if kind is OutputKind.CLAIMS else _VERDICTS_SENTENCE
+        body = f'The "content" field holds your full prose answer.\n{sentence}'
     return (
-        f"{_DIRECTIVE_HEADER}{json.dumps(schema, separators=(',', ':'))}\n\n"
-        f'The "content" field holds your full prose answer.\n{sentence}'
+        f"{_DIRECTIVE_HEADER}{json.dumps(schema, separators=(',', ':'))}\n\n{body}"
     )
 
 
@@ -211,11 +249,20 @@ class _VerdictsOutput(BaseModel):
     verdicts: list[_VerdictDTO]
 
 
+class _DecisionDTO(BaseModel):
+    action: DecisionAction
+    target: AgentRole | None = None
+    instruction: str = ""
+    reason: str
+    confidence: float
+
+
 @dataclass(frozen=True, slots=True)
 class StructuredResult:
     content: str
     claims: list[Claim] | None
     verdicts: list[Verdict] | None
+    decision: ManagerDecision | None = None
 
 
 def _domain_evidence(items: list[_EvidenceDTO]) -> list[Evidence]:
@@ -252,3 +299,30 @@ def parse_verdicts(raw: str) -> StructuredResult:
         for item in out.verdicts
     ]
     return StructuredResult(content=out.content, claims=None, verdicts=verdicts)
+
+
+def parse_decision(raw: str) -> StructuredResult:
+    """Extract -> DTO (extras ignored) -> ManagerDecision (validators run).
+
+    Incoherent decisions (call_agent without a worker target/instruction)
+    raise ValidationError, feeding the Agent's retry-once correction loop.
+    """
+    data = json.loads(extract_json(raw))
+    out = _DecisionDTO.model_validate(data)
+    decision = ManagerDecision(
+        action=out.action,
+        target=out.target,
+        instruction=out.instruction,
+        reason=out.reason,
+        confidence=out.confidence,
+    )
+    return StructuredResult(content="", claims=None, verdicts=None, decision=decision)
+
+
+def normalize_decision(decision: ManagerDecision) -> ManagerDecision:
+    """FINISH decisions tolerate (and scrub) stray target/instruction (PRD §6.1)."""
+    if decision.action is DecisionAction.FINISH and (
+        decision.target is not None or decision.instruction
+    ):
+        return decision.model_copy(update={"target": None, "instruction": ""})
+    return decision

@@ -8,6 +8,7 @@ import pytest
 from app.runs import (
     TERMINAL_EVENT_TYPES,
     ErrorInfo,
+    RoundSnapshot,
     RunActiveError,
     RunEvent,
     RunEventType,
@@ -228,4 +229,48 @@ def test_step_record_defaults():
     assert step.message is None
     assert step.skipped is False
     assert step.error is None
+    assert step.round is None
     assert ErrorInfo(type="X", message="m").hint == ""
+
+
+# ------------------------------------------------- Phase 5 state additions
+
+def test_phase5_step_kinds_exist():
+    assert StepKind.DECIDE.value == "decide"
+    assert StepKind.REVISE.value == "revise"
+    assert len(StepKind) == 7
+
+
+def test_run_record_rounds_default_empty():
+    runs = _manager()
+    run = runs.create("t")
+    assert run.rounds == []
+
+
+def test_round_snapshot_defaults():
+    snap = RoundSnapshot(
+        round_number=1, claims=[], origins={}, verdicts=[],
+        worker_content={}, skeptic_content="", supported_count=0,
+        unresolved_count=0,
+    )
+    assert snap.decision is None
+    assert snap.worker_content == {}
+    snap2 = RoundSnapshot(
+        round_number=2, claims=[], origins={}, verdicts=[],
+        worker_content={}, skeptic_content="", supported_count=3,
+        unresolved_count=1, decision=None,
+    )
+    assert snap2.round_number == 2
+
+
+async def test_event_carries_round_field():
+    runs = _manager()
+    run = runs.create("t")
+    event = runs.append_event(
+        run.id, RunEventType.STEP_STARTED, step=5, kind=StepKind.DECIDE,
+        agent=AgentRole.MANAGER, round=2,
+    )
+    assert event.round == 2
+    assert RunEvent.model_validate_json(event.model_dump_json()) == event
+    with pytest.raises(Exception):
+        RunEvent(seq=1, type=RunEventType.RUN_STARTED, run_id="x", round=0)

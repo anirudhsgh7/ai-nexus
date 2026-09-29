@@ -47,12 +47,23 @@ def _run_not_found(run_id: str) -> JSONResponse:
     return _error_response(404, "RunNotFoundError", f"unknown run: {run_id}")
 
 
+def _decision_summary(decision: Any) -> dict[str, Any] | None:
+    if decision is None:
+        return None
+    return {
+        "action": decision.action.value,
+        "target": decision.target.value if decision.target else None,
+        "reason": decision.reason,
+    }
+
+
 def _step_payload(step: StepRecord) -> dict[str, Any]:
     return {
         "index": step.index,
         "kind": step.kind.value,
         "agent": step.agent.value,
         "status": step.status.value,
+        "round": step.round,
         "duration_ms": step.duration_ms,
         "skipped": step.skipped,
         "message": step.message.model_dump(mode="json") if step.message else None,
@@ -70,6 +81,15 @@ def _run_payload(run: RunRecord) -> dict[str, Any]:
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "duration_ms": run.duration_ms,
         "steps": [_step_payload(s) for s in run.steps],
+        "rounds": [
+            {
+                "round": snap.round_number,
+                "supported": snap.supported_count,
+                "unresolved": snap.unresolved_count,
+                "decision": _decision_summary(snap.decision),
+            }
+            for snap in run.rounds
+        ],
         "final_message": (
             run.final_message.model_dump(mode="json") if run.final_message else None
         ),

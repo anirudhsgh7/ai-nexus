@@ -13,6 +13,7 @@ PRD_DEFAULTS = {
     "primary_model": "qwen2.5:14b-instruct",
     "fallback_model": "qwen2.5:7b-instruct",
     "num_ctx": 8192,
+    "max_rounds": 3,
     "keep_alive": "30m",
     "request_timeout_s": 300.0,
     "connect_timeout_s": 5.0,
@@ -48,6 +49,20 @@ def test_invalid_num_ctx_rejected():
         Settings(num_ctx=1024)
     with pytest.raises(ValidationError):
         Settings(num_ctx=65536)
+
+
+def test_max_rounds_bounds():
+    assert Settings(max_rounds=1).max_rounds == 1
+    assert Settings(max_rounds=5).max_rounds == 5
+    with pytest.raises(ValidationError):
+        Settings(max_rounds=0)
+    with pytest.raises(ValidationError):
+        Settings(max_rounds=6)
+
+
+def test_max_rounds_env_override(monkeypatch):
+    monkeypatch.setenv("AI_NEXUS_MAX_ROUNDS", "2")
+    assert Settings().max_rounds == 2
 
 
 def test_equal_models_rejected():

@@ -98,9 +98,54 @@ def test_post_creates_run_and_completes(api):
     assert final["status"] == "completed"
     assert final["duration_ms"] is not None
     assert final["steps"][0]["kind"] == "plan"
+    assert final["steps"][0]["round"] is None
     assert final["steps"][0]["message"]["content"] == "plan"
     assert final["final_message"]["type"] == "plan"
     assert final["error"] is None
+    # Phase 5: per-round summaries present (fake orchestrator creates none)
+    assert final["rounds"] == []
+
+
+def test_run_payload_round_summaries_round_trip():
+    """GET shape for rounds: counts + decision summary (PRD §6.8)."""
+    from datetime import UTC, datetime
+
+    from app.api.runs import _run_payload
+    from app.runs import RoundSnapshot, RunStatus
+    from app.schemas import DecisionAction, ManagerDecision
+
+    run = appless_run()
+    run.rounds.append(
+        RoundSnapshot(
+            round_number=1, claims=[], origins={}, verdicts=[],
+            worker_content={}, skeptic_content="", supported_count=3,
+            unresolved_count=2,
+            decision=ManagerDecision(
+                action=DecisionAction.CALL_AGENT, target=AgentRole.RESEARCHER,
+                instruction="Find a source.", reason="gap", confidence=0.8,
+            ),
+        )
+    )
+    payload = _run_payload(run)
+    assert payload["rounds"] == [
+        {
+            "round": 1,
+            "supported": 3,
+            "unresolved": 2,
+            "decision": {
+                "action": "call_agent",
+                "target": "researcher",
+                "reason": "gap",
+            },
+        }
+    ]
+
+
+def appless_run():
+    from app.runs import RunManager, RunStatus
+
+    manager = RunManager()
+    return manager.create("payload test")
 
 
 def test_post_while_active_returns_409(api):

@@ -20,7 +20,9 @@ __all__ = [
     "Claim",
     "ClaimStatus",
     "ClaimVerdict",
+    "DecisionAction",
     "Evidence",
+    "ManagerDecision",
     "MessageType",
     "Verdict",
 ]
@@ -36,7 +38,7 @@ class AgentRole(str, Enum):
 
 
 class MessageType(str, Enum):
-    """Envelope types. DECISION/REVISION are deferred to Phase 5."""
+    """Envelope types."""
 
     PLAN = "plan"
     FINDING = "finding"
@@ -44,6 +46,8 @@ class MessageType(str, Enum):
     CRITIQUE = "critique"
     QUESTION = "question"
     SYNTHESIS = "synthesis"
+    DECISION = "decision"      # Phase 5: manager routing decisions
+    REVISION = "revision"      # Phase 5: iterative worker revision turns
 
 
 class ClaimStatus(str, Enum):
@@ -112,12 +116,41 @@ class Verdict(BaseModel):
         return self
 
 
+class DecisionAction(str, Enum):
+    """Manager routing actions (Phase 5 PRD §6.1/§13: iterate consolidated into call_agent)."""
+
+    CALL_AGENT = "call_agent"
+    FINISH = "finish"
+
+
+class ManagerDecision(BaseModel):
+    """Constrained routing decision; executed by the orchestrator, never prose."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    action: DecisionAction
+    target: AgentRole | None = None
+    instruction: str = ""
+    reason: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _coherent(self) -> "ManagerDecision":
+        if not self.reason.strip():
+            raise ValueError("reason must be non-empty")
+        if self.action is DecisionAction.CALL_AGENT:
+            if self.target not in {AgentRole.RESEARCHER, AgentRole.IDEATOR}:
+                raise ValueError("call_agent requires target researcher or ideator")
+            if not self.instruction.strip():
+                raise ValueError("call_agent requires a non-empty instruction")
+        return self
+
+
 class AgentMessage(BaseModel):
     """The unified agent-to-agent message envelope.
 
-    Claims-kind outputs populate `claims`; verdicts-kind outputs populate
-    `verdicts` (never both). `confidence` is reserved and intentionally not
-    populated in Phase 3: per-claim confidence is authoritative.
+    Exactly one of `claims`, `verdicts`, `decision` is non-None on a structured
+    message. `confidence` is reserved: per-claim confidence is authoritative.
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -129,6 +162,7 @@ class AgentMessage(BaseModel):
     content: str = ""
     claims: list[Claim] | None = None
     verdicts: list[Verdict] | None = None
+    decision: ManagerDecision | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     tool_calls: list[ToolCall] | None = None
     round: int | None = Field(default=None, ge=1)

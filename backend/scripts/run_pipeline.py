@@ -23,13 +23,20 @@ from app.llm import get_provider  # noqa: E402
 from app.orchestrator import Orchestrator  # noqa: E402
 from app.runs import RunEvent, RunEventType, RunManager  # noqa: E402
 
-TOTAL_STEPS = 5
-
-
 def _fmt_step(event: RunEvent) -> str:
     message = event.message
-    if event.skipped:
+    if event.skipped and message is None:
         detail = "skipped"
+    elif event.kind is not None and event.kind.value == "decide" and message is not None:
+        decision = message.decision
+        if event.skipped and decision is not None:
+            detail = f"forced finish — {decision.reason}"
+        elif decision is not None:
+            detail = decision.action.value + (
+                f" → {decision.target.value}" if decision.target else ""
+            )
+        else:
+            detail = ""
     elif message is None:
         detail = "no output"
     elif message.verdicts is not None:
@@ -45,12 +52,18 @@ def _fmt_step(event: RunEvent) -> str:
     )
     name = (event.agent.value if event.agent else "?").capitalize()
     kind = event.kind.value if event.kind else "?"
-    return f"[{event.step}/{TOTAL_STEPS}] {name:<11}{kind:<11}{duration}   {detail}"
+    round_tag = f"r{event.round} " if event.round is not None else ""
+    return f"[{event.step}] {name:<11}{kind:<11}{round_tag:<4}{duration}   {detail}"
 
 
 def _print_details(event: RunEvent) -> None:
     message = event.message
     if message is None:
+        return
+    if message.decision is not None:
+        print(f"         reason: {message.decision.reason}")
+        if message.decision.instruction:
+            print(f"         instruction: {message.decision.instruction}")
         return
     origin = message.from_agent.value
     for claim in message.claims or []:
@@ -66,7 +79,7 @@ async def run(args: argparse.Namespace) -> int:
         provider = get_provider(settings)
         registry = build_registry(provider)
         store = RunManager()
-        orchestrator = Orchestrator(registry, store)
+        orchestrator = Orchestrator(registry, store, max_rounds=settings.max_rounds)
     except Exception as exc:
         print(f"setup error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2

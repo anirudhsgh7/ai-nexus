@@ -159,6 +159,17 @@ async def test_verdicts_without_input_claims_fails_before_provider():
     assert provider.chat_calls == []
 
 
+async def test_verdicts_guard_uses_resolved_kind_not_config():
+    """A PLAIN-config agent overridden to VERDICTS still enforces the guard."""
+    from app.agents.structured import OutputKind
+
+    provider = FakeProvider()
+    plain_config = _claims_config(output_kind=OutputKind.PLAIN)
+    with pytest.raises(ValueError, match="requires claims"):
+        await _run(plain_config, provider, task="t", output_kind=OutputKind.VERDICTS)
+    assert provider.chat_calls == []
+
+
 # ------------------------------------------------------------ retry-once
 
 async def test_retry_then_success(caplog):
