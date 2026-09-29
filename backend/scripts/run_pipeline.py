@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""Run the full 5-step pipeline in one command (Phase 4 exit criterion).
+
+Usage (from backend/):
+  python scripts/run_pipeline.py "Should a two-person startup write down decisions?"
+  python scripts/run_pipeline.py "..." --verbose
+  python scripts/run_pipeline.py "..." --json        # NDJSON RunEvents
+"""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app import logging_config  # noqa: E402
+from app.agents import build_registry  # noqa: E402
+from app.config import get_settings  # noqa: E402
+from app.llm import get_provider  # noqa: E402
+from app.orchestrator import Orchestrator  # noqa: E402
+from app.runs import RunEvent, RunEventType, RunManager  # noqa: E402
+
+TOTAL_STEPS = 5
+
+
+def _fmt_step(event: RunEvent) -> str:
+    message = event.message
+    if event.skipped:
+        detail = "skipped"
+    elif message is None:
+        detail = "no output"
+    elif message.verdicts is not None:
+        detail = f"{len(message.verdicts)} verdicts"
+    elif message.claims is not None:
+        detail = f"{len(message.claims)} claims"
+    else:
+        detail = ""
+    duration = (
+        f"{event.duration_ms / 1000:6.1f}s"
+        if event.duration_ms is not None
+        else "   n/a"
+    )
+    name = (event.agent.value if event.agent else "?").capitalize()
+    kind = event.kind.value if event.kind else "?"
+    return f"[{event.step}/{TOTAL_STEPS}] {name:<11}{kind:<11}{duration}   {detail}"
+
+
+def _print_details(event: RunEvent) -> None:
+    message = event.message
+    if message is None:
+        return
+    origin = message.from_agent.value
+    for claim in message.claims or []:
+        print(f"         [{claim.id}] ({origin}) {claim.status.value} — {claim.statement}")
+    for verdict in message.verdicts or []:
+        print(f"         [{verdict.claim_id}] {verdict.verdict.value} — {verdict.objection}")
+
+
+async def run(args: argparse.Namespace) -> int:
+    try:
+        settings = get_settings()
+        logging_config.configure(settings.log_level)
+        provider = get_provider(settings)
+        registry = build_registry(provider)
+        store = RunManager()
+        orchestrator = Orchestrator(registry, store)
+    except Exception as exc:
+        print(f"setup error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        run_record = store.create(args.task)
+        queue, _ = store.subscribe(run_record.id)
+        task = asyncio.create_task(orchestrator.execute(run_record.id))
+        store.register_task(run_record.id, task)
+
+        while True:
+            event = await queue.get()
+            if args.json:
+                print(event.model_dump_json(), flush=True)
+            elif event.type is RunEventType.STEP_COMPLETED:
+                print(_fmt_step(event), flush=True)
+                if args.verbose:
+                    _print_details(event)
+            elif event.type is RunEventType.RUN_FAILED:
+                error = event.error
+                print(
+                    f"\nRUN FAILED at step {event.step} ({event.kind.value if event.kind else '?'}): "
+                    f"{error.type}: {error.message}",
+                    file=sys.stderr,
+                )
+                if error.hint:
+                    print(f"HINT: {error.hint}", file=sys.stderr)
+                return 1
+            elif event.type is RunEventType.RUN_COMPLETED:
+                if not args.json:
+                    final = event.message
+                    print("=" * 60)
+                    print("FINAL ANSWER")
+                    print("=" * 60)
+                    print((final.content if final else "").strip())
+                return 0
+    finally:
+        await provider.aclose()
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("task", help="the problem the team works on")
+    parser.add_argument("--verbose", action="store_true",
+                        help="print claims/verdicts under each step")
+    parser.add_argument("--json", action="store_true",
+                        help="emit NDJSON RunEvents (no human output)")
+    return asyncio.run(run(parser.parse_args()))
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

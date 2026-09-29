@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app import logging_config
-from app.api import health
+from app.agents import build_registry
+from app.api import health, runs as runs_api
 from app.config import get_settings
 from app.llm import (
     LLMError,
@@ -19,6 +21,8 @@ from app.llm import (
     RequestTimeoutError,
     get_provider,
 )
+from app.orchestrator import Orchestrator
+from app.runs import RunManager
 
 logger = logging.getLogger("ai_nexus.app")
 
@@ -28,9 +32,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     logging_config.configure(settings.log_level)
     provider: LLMProvider = get_provider(settings)
+    runs = RunManager()
     app.state.provider = provider
     app.state.settings = settings
     app.state.health_cache = None
+    app.state.registry = build_registry(provider)
+    app.state.runs = runs
+    app.state.orchestrator = Orchestrator(app.state.registry, runs)
     logger.info(
         "app_start version=%s base_url=%s model=%s num_ctx=%s",
         settings.app_version,
@@ -41,6 +49,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        active = runs.cancel_active_task()
+        if active is not None:
+            with suppress(asyncio.CancelledError):
+                await active
         await provider.aclose()
         logger.info("app_shutdown")
 
@@ -60,6 +72,7 @@ def create_app() -> FastAPI:
         allow_credentials=False,
     )
     fastapi_app.include_router(health.router, prefix="/api")
+    fastapi_app.include_router(runs_api.router, prefix="/api")
 
     @fastapi_app.exception_handler(LLMError)
     async def _llm_error_handler(request: Request, exc: LLMError) -> JSONResponse:
