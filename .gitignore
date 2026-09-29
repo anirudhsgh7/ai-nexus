@@ -1,0 +1,267 @@
+# ==========================================
+# Documentation / Non-code (agent working files)
+# ==========================================
+
+# AI agent instruction & context files
+AGENTS.md
+agents.md
+CLAUDE.md
+claude.md
+GEMINI.md
+.cursor/
+.copilot/
+.aider*
+.opencode/
+AGENT*.md
+PRIORITIES.md
+CONTEXT.md
+HANDOFF.md
+
+# Product / planning docs
+PRD*.md
+prd*.md
+docs/
+doc/
+documentation/
+_notes/
+notes/
+.adr/
+adr/
+architecture/
+RFCs/
+rfcs/
+design/
+RFC.md
+
+# All other markdown / docs
+*.md
+!*.md.keep
+*.mdx
+*.markdown
+*.rst
+*.adoc
+*.asciidoc
+*.txt
+# .txt files that are actually required by the build/runtime
+!requirements*.txt
+!constraints*.txt
+!CMakeLists.txt
+!colcon*.txt
+*.pdf
+*.doc
+*.docx
+*.ppt
+*.pptx
+*.xls
+*.xlsx
+*.csv
+*.odt
+*.odp
+
+# Track changelogs? (kept commented out - uncomment if desired)
+# CHANGELOG.md
+
+# ==========================================
+# Secrets / environment
+# ==========================================
+.env
+.env.*
+!.env.example
+!.env.template
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+secrets/
+secrets.*
+credentials.json
+service-account*.json
+.netrc
+.npmrc.local
+.pypirc
+
+# ==========================================
+# AI / LLM artifacts
+# ==========================================
+*.prompt
+prompts/
+.claude-cache/
+.cache/
+**/conversations/
+**/thread_logs/
+
+# ==========================================
+# Dependencies
+# ==========================================
+node_modules/
+jspackages/
+bower_components/
+.pnp
+.pnp.js
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+build/
+develop-eggs/
+dist/
+sdist/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+Pipfile.lock
+poetry.lock
+uv.lock
+.yarn-integrity
+.pdm-python
+.pdm-build
+__pypackages__/
+
+# ==========================================
+# Build output
+# ==========================================
+.next/
+.nuxt/
+.output/
+.svelte-kit/
+.astro/
+.vercel/
+.netlify/
+.serverless/
+.docusaurus/
+.turbo/
+.angular/
+.cache-loader/
+.metro-health-check*
+/out/
+storybook-static/
+*.tsbuildinfo
+.eslintcache
+.stylelintcache
+rollup.config.*
+webpack.config.*
+vite.config.*
+!vite.config.ts
+.parcel-cache/
+.swc/
+
+# ==========================================
+# Test / Coverage
+# ==========================================
+coverage/
+*.lcov
+.nyc_output/
+.pytest_cache/
+.hypothesis/
+.tox/
+.nox/
+test-results/
+playwright-report/
+blob-report/
+.playwright/
+cypress/screenshots/
+cypress/videos/
+allure-results/
+
+# ==========================================
+# Caches
+# ==========================================
+.cache/
+.temp/
+.tmp/
+tmp/
+temp/
+*.tmp
+*.temp
+*.log
+logs/
+*.bak
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# ==========================================
+# Databases / local data
+# ==========================================
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.sql
+dump.sql
+postgres_data/
+mongo_data/
+redis_data/
+*.rdb
+pgdata/
+
+# ==========================================
+# Virtual environments / Editors
+# ==========================================
+.venv/
+venv/
+env/
+ENV/
+virtualenv/
+dev-env/
+.direnv/
+.python-version
+poetry.toml
+
+# ==========================================
+# Compiled binaries (scoped to output dirs to protect
+# any legitimately tracked source in lib/, bin/, obj/)
+# ==========================================
+*.exe
+*.dll
+*.dylib
+*.o
+*.a
+*.class
+# only inside build output
+build/**/*.so
+dist/**/*.so
+target/**
+target/
+
+# Keep source in these, but never ship built artifacts from them
+lib/**/*.so
+bin/**/*.so
+lib/**/*.log
+
+# ==========================================
+# Deployment / infrastructure state
+# ==========================================
+.terraform/
+*.tfstate
+*.tfstate.*
+.terraform.lock.hcl
+.waf/
+.aws/
+.ansible/
+Pulumi.yaml
+k8s-manifest/
+kustomization/
+helm/values-*.override.yaml
+secrets.yaml
+
+# ==========================================
+# OS / misc
+# ==========================================
+.machineid
+*.pid
+*.seed
+*.log.[0-9]*
