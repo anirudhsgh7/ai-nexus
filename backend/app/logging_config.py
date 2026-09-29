@@ -50,3 +50,15 @@ def provider_unavailable(logger: logging.Logger, **fields: Any) -> None:
 
 def upstream_error(logger: logging.Logger, **fields: Any) -> None:
     logger.error("upstream_error %s", _kv(**fields))
+
+
+def agent_run_start(logger: logging.Logger, **fields: Any) -> None:
+    logger.info("agent_run_start %s", _kv(**fields))
+
+
+def agent_run_end(logger: logging.Logger, **fields: Any) -> None:
+    logger.info("agent_run_end %s", _kv(**fields))
+
+
+def agent_run_error(logger: logging.Logger, **fields: Any) -> None:
+    logger.error("agent_run_error %s", _kv(**fields))
