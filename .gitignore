@@ -159,6 +159,8 @@ coverage/
 *.lcov
 .nyc_output/
 .pytest_cache/
+# Local benchmark runs (measured per machine, not source)
+benchmark_results*.json
 .hypothesis/
 .tox/
 .nox/
