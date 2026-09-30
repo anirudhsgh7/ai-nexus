@@ -1,0 +1,51 @@
+[
+  {
+    "seq": 1,
+    "type": "run_started",
+    "run_id": "failedrun1",
+    "ts": "2026-09-30T09:51:55.415976Z",
+    "step": null,
+    "kind": null,
+    "agent": null,
+    "round": null,
+    "task": "What is 2+2?",
+    "message": null,
+    "duration_ms": null,
+    "skipped": null,
+    "error": null
+  },
+  {
+    "seq": 2,
+    "type": "step_started",
+    "run_id": "failedrun1",
+    "ts": "2026-09-30T09:51:55.415976Z",
+    "step": 1,
+    "kind": "research",
+    "agent": "researcher",
+    "round": 1,
+    "task": null,
+    "message": null,
+    "duration_ms": null,
+    "skipped": null,
+    "error": null
+  },
+  {
+    "seq": 3,
+    "type": "run_failed",
+    "run_id": "failedrun1",
+    "ts": "2026-09-30T09:51:55.415976Z",
+    "step": 1,
+    "kind": "research",
+    "agent": "researcher",
+    "round": 1,
+    "task": null,
+    "message": null,
+    "duration_ms": null,
+    "skipped": null,
+    "error": {
+      "type": "RequestTimeoutError",
+      "message": "LLM request timed out after 300.0s",
+      "hint": "Cold model load can be slow; raise AI_NEXUS_REQUEST_TIMEOUT_S."
+    }
+  }
+]
