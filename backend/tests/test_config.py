@@ -87,3 +87,54 @@ def test_invalid_log_level_rejected():
 
 def test_get_settings_cached():
     assert get_settings() is get_settings()
+
+
+# ------------------------------------------------------- tools (Phase 6 PRD §6.4)
+
+TOOL_DEFAULTS = {
+    "tool_max_steps": 5,
+    "tool_timeout_s": 20.0,
+    "tool_result_max_chars": 2000,
+    "tool_results_budget_chars": 6000,
+    "tool_files_root": "",
+    "tool_web_search_enabled": False,
+    "tool_web_search_max_results": 5,
+}
+
+
+def test_tool_defaults(settings: Settings):
+    for field, expected in TOOL_DEFAULTS.items():
+        assert getattr(settings, field) == expected, field
+
+
+def test_tool_env_override(monkeypatch):
+    monkeypatch.setenv("AI_NEXUS_TOOL_MAX_STEPS", "3")
+    monkeypatch.setenv("AI_NEXUS_TOOL_WEB_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("AI_NEXUS_TOOL_FILES_ROOT", "/tmp/corpus")
+    s = Settings()
+    assert s.tool_max_steps == 3
+    assert s.tool_web_search_enabled is True
+    assert s.tool_files_root == "/tmp/corpus"
+
+
+def test_tool_bounds():
+    assert Settings(tool_max_steps=1).tool_max_steps == 1
+    assert Settings(tool_max_steps=10).tool_max_steps == 10
+    for bad in ({"tool_max_steps": 0}, {"tool_max_steps": 11},
+                {"tool_result_max_chars": 100}, {"tool_result_max_chars": 9000},
+                {"tool_web_search_max_results": 0},
+                {"tool_web_search_max_results": 11},
+                {"tool_timeout_s": 0.0}):
+        with pytest.raises(ValidationError):
+            Settings(**bad)
+
+
+def test_tool_budget_must_cover_result_cap():
+    assert Settings(
+        tool_result_max_chars=2000, tool_results_budget_chars=6000
+    ).tool_results_budget_chars == 6000
+    with pytest.raises(ValidationError):
+        Settings(tool_result_max_chars=4000, tool_results_budget_chars=3000)
+    # raising the cap alone trips the cross-field validator
+    with pytest.raises(ValidationError):
+        Settings(tool_result_max_chars=8000)

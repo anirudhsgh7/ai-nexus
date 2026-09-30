@@ -66,9 +66,12 @@ def test_output_kind_table():
     assert all(c.output_kind is not OutputKind.PLAIN for c in CONFIGS.values())
 
 
-def test_capabilities_empty_in_phase2():
-    for role, cfg in CONFIGS.items():
-        assert cfg.capabilities == frozenset(), role
+def test_capability_table():
+    """Phase 6 PRD §6.7: workers get tools, the Manager router gets none."""
+    expected_workers = frozenset({"file_search", "file_reader", "web_search", "memory"})
+    assert CONFIGS[AgentRole.MANAGER].capabilities == frozenset()
+    for role in (AgentRole.RESEARCHER, AgentRole.IDEATOR, AgentRole.SKEPTIC):
+        assert CONFIGS[role].capabilities == expected_workers, role
 
 
 def test_directive_keywords_present():
@@ -101,7 +104,8 @@ def test_instruction_length_budget():
 
 
 def test_prompt_version_and_display_names():
-    assert [CONFIGS[r].prompt_version for r in AgentRole] == [1, 1, 1, 1]
+    # Phase 6 touched the three worker prompts (tool-usage rules); Manager untouched.
+    assert [CONFIGS[r].prompt_version for r in AgentRole] == [1, 2, 2, 2]
     assert {c.display_name for c in CONFIGS.values()} == {
         "Manager", "Researcher", "Ideator", "Skeptic",
     }

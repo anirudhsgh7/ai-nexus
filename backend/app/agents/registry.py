@@ -6,6 +6,10 @@
 2. Append it to `DEFAULT_AGENT_CONFIGS`.
 3. Change nothing else — tests, scripts, and the orchestrator resolve agents
    through this registry only.
+
+Phase 6: capabilities declared on a config resolve against the injected
+`ToolRegistry`. With no registry (`tools=None`) agents get no tools — the
+legacy path every pre-Phase-6 caller relies on.
 """
 
 from __future__ import annotations
@@ -17,6 +21,7 @@ from app.agents.base import Agent, AgentConfig
 from app.agents.errors import AgentNotRegisteredError
 from app.llm.base import LLMProvider
 from app.schemas import AgentRole
+from app.tools.registry import ToolRegistry
 
 DEFAULT_AGENT_CONFIGS: tuple[AgentConfig, ...] = (
     manager.CONFIG,
@@ -57,6 +62,20 @@ class AgentRegistry:
 def build_registry(
     provider: LLMProvider,
     configs: Sequence[AgentConfig] = DEFAULT_AGENT_CONFIGS,
+    tools: ToolRegistry | None = None,
 ) -> AgentRegistry:
-    """Construct a registry. No import-time instances; provider always injected."""
-    return AgentRegistry(Agent(config, provider) for config in configs)
+    """Construct a registry. No import-time instances; provider always injected.
+
+    `tools=None` (default) resolves every capability set to the empty tuple —
+    pre-Phase-6 callers keep byte-identical behavior.
+    """
+
+    def factory(config: AgentConfig) -> Agent:
+        resolved = (
+            tools.resolve(config.capabilities, agent=config.role)
+            if tools is not None
+            else ()
+        )
+        return Agent(config, provider, resolved)
+
+    return AgentRegistry(factory(config) for config in configs)

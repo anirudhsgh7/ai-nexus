@@ -24,6 +24,7 @@ __all__ = [
     "Evidence",
     "ManagerDecision",
     "MessageType",
+    "ToolResult",
     "Verdict",
 ]
 
@@ -123,6 +124,22 @@ class DecisionAction(str, Enum):
     FINISH = "finish"
 
 
+class ToolResult(BaseModel):
+    """Outcome of one executed tool call (Phase 6 PRD §6.1).
+
+    `content` is the exact envelope string sent back to the model; `error` is
+    a machine code when the call failed, `None` on success. Parallel to
+    `AgentMessage.tool_calls` by index.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    name: str = Field(min_length=1)
+    content: str
+    error: str | None = None
+    duration_ms: float | None = Field(default=None, ge=0.0)
+
+
 class ManagerDecision(BaseModel):
     """Constrained routing decision; executed by the orchestrator, never prose."""
 
@@ -165,6 +182,7 @@ class AgentMessage(BaseModel):
     decision: ManagerDecision | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     tool_calls: list[ToolCall] | None = None
+    tool_results: list[ToolResult] | None = None
     round: int | None = Field(default=None, ge=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

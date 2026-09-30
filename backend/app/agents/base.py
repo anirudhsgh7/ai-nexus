@@ -29,9 +29,17 @@ from app.agents.structured import (
     parse_verdicts,
     schema_for,
 )
+from app.agents.tool_loop import (
+    FINAL_ANSWER_NUDGE,
+    STRUCTURED_NUDGE,
+    ToolLoopOutcome,
+    gather_with_tools,
+)
 from app.claims import render_claims, validate_claims, validate_verdicts
-from app.llm.base import ChatMessage, ChatRole, LLMError, LLMProvider
+from app.config import get_settings
+from app.llm.base import ChatMessage, ChatRole, LLMError, LLMProvider, TokenUsage
 from app.schemas import AgentMessage, AgentRole, Claim, MessageType
+from app.tools import Tool, ToolContext
 
 logger = logging.getLogger("ai_nexus.agents.base")
 
@@ -103,11 +111,21 @@ def format_user_content(
 
 
 class Agent:
-    """One agent: config + provider. Stateless between run() calls."""
+    """One agent: config + provider (+ tools, Phase 6).
 
-    def __init__(self, config: AgentConfig, provider: LLMProvider) -> None:
+    Stateless between run() calls. With no tools resolved, every code path is
+    byte-identical to Phase 5; with tools, a bounded gather loop (PRD §6.5.2)
+    precedes the structured/plain answer.
+    """
+
+    def __init__(
+        self, config: AgentConfig, provider: LLMProvider,
+        tools: Sequence[Tool] = (),
+    ) -> None:
         self._config = config
         self._provider = provider
+        self._tools = tuple(sorted(tools, key=lambda tool: tool.name))
+        self._tool_specs = [tool.spec() for tool in self._tools]
 
     @property
     def config(self) -> AgentConfig:
@@ -130,6 +148,7 @@ class Agent:
         message_type: MessageType | None = None,
         to_agent: AgentRole | None = None,
         output_kind: OutputKind | None = None,
+        run_id: str | None = None,
     ) -> AgentMessage:
         if not task.strip():
             raise ValueError("task must be non-empty")
@@ -141,10 +160,17 @@ class Agent:
         if kind is OutputKind.VERDICTS and not input_claims:
             raise ValueError("verdicts output requires claims to evaluate")
 
-        system_prompt = cfg.instructions
-        if kind is not OutputKind.PLAIN:
-            system_prompt = f"{cfg.instructions}\n\n{directive_for(kind)}"
+        tools_enabled = bool(self._tools)
+        directive = "" if kind is OutputKind.PLAIN else directive_for(kind)
 
+        # Legacy structured calls carry the directive in the system prompt up
+        # front. Tool-enabled calls keep Phase A prompt clean (the probe showed
+        # a format-hungry prompt suppresses tool use) and add the directive at
+        # Phase B instead.
+        if directive and not tools_enabled:
+            system_prompt = f"{cfg.instructions}\n\n{directive}"
+        else:
+            system_prompt = cfg.instructions
         messages = [
             ChatMessage(role=ChatRole.SYSTEM, content=system_prompt),
             ChatMessage(
@@ -170,18 +196,75 @@ class Agent:
             context_chars=len(context) if context else 0,
             output_kind=kind.value,
             input_claims_count=len(input_claims),
+            tools_count=len(self._tools),
         )
         started = time.monotonic()
 
+        outcome: ToolLoopOutcome | None = None
+        parsed: StructuredResult | None = None
+        usage = TokenUsage()
+        retries = 0
+        plain_content = ""
+        plain_tool_calls = None
+
         try:
-            if kind is OutputKind.PLAIN:
+            if tools_enabled:
+                settings = get_settings()
+                outcome = await gather_with_tools(
+                    self._provider,
+                    messages=messages,
+                    tools=self._tools,
+                    context=ToolContext(agent=cfg.role, run_id=run_id),
+                    model=cfg.model,
+                    temperature=cfg.temperature,
+                    max_tokens=effective_max_tokens,
+                    max_steps=settings.tool_max_steps,
+                    result_budget_chars=settings.tool_results_budget_chars,
+                )
+                if kind is OutputKind.PLAIN:
+                    plain_content = outcome.last_content
+                    usage = outcome.last_usage
+                    if not plain_content.strip():
+                        # one final no-tools turn so plain agents can still answer
+                        final = await self._provider.chat(
+                            [
+                                *outcome.messages,
+                                ChatMessage(
+                                    role=ChatRole.USER,
+                                    content=FINAL_ANSWER_NUDGE,
+                                ),
+                            ],
+                            model=cfg.model,
+                            temperature=cfg.temperature,
+                            max_tokens=effective_max_tokens,
+                        )
+                        plain_content = final.content
+                        usage = final.usage
+                else:
+                    phase_b_messages = [
+                        ChatMessage(
+                            role=ChatRole.SYSTEM,
+                            content=f"{cfg.instructions}\n\n{directive}",
+                        ),
+                        *outcome.messages[1:],
+                        ChatMessage(role=ChatRole.USER, content=STRUCTURED_NUDGE),
+                    ]
+                    result, parsed, retries = await self._structured_attempts(
+                        phase_b_messages, kind, input_claims, effective_max_tokens
+                    )
+                    usage = result.usage
+            elif kind is OutputKind.PLAIN:
                 result, parsed, retries = await self._plain_call(
                     messages, effective_max_tokens
                 )
+                usage = result.usage
+                plain_content = result.content
+                plain_tool_calls = result.tool_calls or None
             else:
                 result, parsed, retries = await self._structured_attempts(
                     messages, kind, input_claims, effective_max_tokens
                 )
+                usage = result.usage
         except LLMError as exc:
             log.agent_run_error(
                 logger, agent=cfg.role.value,
@@ -195,21 +278,36 @@ class Agent:
             )
             raise
 
-        content = parsed.content if parsed is not None else result.content
+        content = parsed.content if parsed is not None else plain_content
         out_claims = parsed.claims if parsed is not None else None
         out_verdicts = parsed.verdicts if parsed is not None else None
         out_decision = parsed.decision if parsed is not None else None
-        tool_calls = result.tool_calls or None
-        if (
-            not content.strip()
-            and not out_claims
-            and not out_verdicts
-            and not out_decision
-            and not tool_calls
-        ):
+        if outcome is not None:
+            tool_calls = outcome.calls or None
+            tool_results = outcome.outcomes or None
+            tool_steps = outcome.steps
+        else:
+            tool_calls = plain_tool_calls if kind is OutputKind.PLAIN else None
+            tool_results = None
+            tool_steps = 0
+
+        # Empty rule: for PLAIN, tool activity counts as output (a tool-using
+        # agent that produced only calls still delivered something). For
+        # structured kinds only structured fields count — activity is not output.
+        if kind is OutputKind.PLAIN:
+            has_output = bool(content.strip()) or bool(tool_calls)
+        else:
+            has_output = (
+                bool(content.strip())
+                or bool(out_claims)
+                or bool(out_verdicts)
+                or out_decision is not None
+            )
+        if not has_output:
             log.agent_run_error(
                 logger, agent=cfg.role.value,
-                error_type="EmptyAgentResponseError", message="no content, no tool calls",
+                error_type="EmptyAgentResponseError",
+                message="no content, no tool calls",
             )
             raise EmptyAgentResponseError(cfg.role)
 
@@ -223,7 +321,8 @@ class Agent:
             verdicts=out_verdicts,
             decision=out_decision,
             confidence=None,
-            tool_calls=tool_calls if kind is OutputKind.PLAIN else None,
+            tool_calls=tool_calls,
+            tool_results=tool_results,
             round=None,
             created_at=datetime.now(UTC),
         )
@@ -233,13 +332,14 @@ class Agent:
             message_id=message.id,
             message_type=message.type.value,
             content_chars=len(content),
-            tool_call_count=len(result.tool_calls),
+            tool_call_count=len(tool_calls) if tool_calls else 0,
+            tool_steps=tool_steps,
             claims_count=len(out_claims) if out_claims is not None else 0,
             verdicts_count=len(out_verdicts) if out_verdicts is not None else 0,
             retries=retries,
-            prompt_tokens=result.usage.prompt_tokens,
-            completion_tokens=result.usage.completion_tokens,
-            total_tokens=result.usage.total_tokens,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            total_tokens=usage.total_tokens,
             wall_ms=round((time.monotonic() - started) * 1000, 1),
         )
         return message

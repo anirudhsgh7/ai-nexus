@@ -23,6 +23,7 @@ from app.llm import (
 )
 from app.orchestrator import Orchestrator
 from app.runs import RunManager
+from app.tools import build_tool_registry
 
 logger = logging.getLogger("ai_nexus.app")
 
@@ -33,18 +34,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logging_config.configure(settings.log_level)
     provider: LLMProvider = get_provider(settings)
     runs = RunManager()
+    tool_registry = build_tool_registry(settings)
     app.state.provider = provider
     app.state.settings = settings
     app.state.health_cache = None
-    app.state.registry = build_registry(provider)
+    app.state.tool_registry = tool_registry
+    app.state.registry = build_registry(provider, tools=tool_registry)
     app.state.runs = runs
     app.state.orchestrator = Orchestrator(app.state.registry, runs)
     logger.info(
-        "app_start version=%s base_url=%s model=%s num_ctx=%s",
+        "app_start version=%s base_url=%s model=%s num_ctx=%s tools=%s",
         settings.app_version,
         settings.ollama_base_url,
         settings.primary_model,
         settings.num_ctx,
+        ",".join(tool_registry.names) or "none",
     )
     try:
         yield

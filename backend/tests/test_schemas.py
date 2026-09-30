@@ -16,6 +16,7 @@ from app.schemas import (
     Evidence,
     ManagerDecision,
     MessageType,
+    ToolResult,
     Verdict,
 )
 
@@ -50,14 +51,47 @@ def test_round_trip_with_claims_and_tool_calls():
     assert again.claims[0].statement == "X grew 40%"
 
 
+def test_round_trip_with_tool_results():
+    m = _msg(
+        tool_calls=[
+            ToolCall(name="file_search", arguments={"query": "growth"}),
+            ToolCall(name="web_search", arguments={"query": "growth 2025"}),
+        ],
+        tool_results=[
+            ToolResult(
+                name="file_search",
+                content='{"ok":true,"tool":"file_search","matches":[]}',
+                error=None,
+                duration_ms=12.5,
+            ),
+            ToolResult(name="web_search", content="{}", error="network_error"),
+        ],
+    )
+    again = AgentMessage.model_validate_json(m.model_dump_json())
+    assert again == m
+    assert again.tool_results[0].error is None
+    assert again.tool_results[0].duration_ms == 12.5
+    assert again.tool_results[1].error == "network_error"
+    assert len(again.tool_calls) == len(again.tool_results)
+
+
+def test_tool_result_validation():
+    with pytest.raises(ValidationError):
+        ToolResult(name="", content="{}")
+    with pytest.raises(ValidationError):
+        ToolResult(name="x", content="{}", duration_ms=-1)
+    with pytest.raises(ValidationError):
+        ToolResult.model_validate({"name": "x", "content": "{}", "extra_field": True})
+
+
 def test_wire_field_names():
     import json
 
     data = json.loads(_msg().model_dump_json())
     assert set(data) == {
         "id", "from_agent", "to_agent", "type", "content", "claims",
-        "verdicts", "decision", "confidence", "tool_calls", "round",
-        "created_at",
+        "verdicts", "decision", "confidence", "tool_calls", "tool_results",
+        "round", "created_at",
     }
     assert data["from_agent"] == "researcher"
     assert data["type"] == "finding"
@@ -72,6 +106,7 @@ def test_defaults():
     assert m.verdicts is None
     assert m.confidence is None
     assert m.tool_calls is None
+    assert m.tool_results is None
     assert m.round is None
     assert m.content == "x"
     assert m.created_at.tzinfo is not None

@@ -66,3 +66,15 @@ def agent_run_error(logger: logging.Logger, **fields: Any) -> None:
 
 def agent_structured_retry(logger: logging.Logger, **fields: Any) -> None:
     logger.warning("agent_structured_retry %s", _kv(**fields))
+
+
+def tool_call_start(logger: logging.Logger, **fields: Any) -> None:
+    logger.info("tool_call_start %s", _kv(**fields))
+
+
+def tool_call_end(logger: logging.Logger, **fields: Any) -> None:
+    logger.info("tool_call_end %s", _kv(**fields))
+
+
+def tool_loop_end(logger: logging.Logger, **fields: Any) -> None:
+    logger.info("tool_loop_end %s", _kv(**fields))

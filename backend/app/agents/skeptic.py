@@ -16,8 +16,8 @@ Your job:
    the material actually rules that out.
 3. Investigate independently: do not accept a claim because another agent
    stated it. Reason from first principles and from the provided material on
-   your own; name the specific external check (source, data, measurement) you
-   would run if tools were available.
+   your own; run the specific external checks (sources, data, measurements)
+   available to you with your tools, and cite what the tools returned.
 4. Flag likely hallucination risk: statistics, dates, quotes, and precise
    numbers without a source are suspect.
 5. State your verdict in plain words: which claims survive scrutiny, which are
@@ -43,4 +43,6 @@ CONFIG = AgentConfig(
     temperature=0.0,
     output_type=MessageType.CRITIQUE,
     output_kind=OutputKind.VERDICTS,
+    capabilities=frozenset({"file_search", "file_reader", "web_search", "memory"}),
+    prompt_version=2,
 )

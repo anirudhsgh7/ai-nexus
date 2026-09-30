@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     log_token_usage: bool = True
 
     default_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+
+    # --- Tools (Phase 6) ---
+    tool_max_steps: int = Field(default=5, ge=1, le=10)
+    tool_timeout_s: float = Field(default=20.0, gt=0.0, le=120.0)
+    tool_result_max_chars: int = Field(default=2000, ge=200, le=8000)
+    tool_results_budget_chars: int = Field(default=6000, ge=1000, le=24000)
+    tool_files_root: str = ""           # empty = file tools disabled
+    tool_web_search_enabled: bool = False
+    tool_web_search_max_results: int = Field(default=5, ge=1, le=10)
+
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:5173",
@@ -77,6 +87,15 @@ class Settings(BaseSettings):
         if level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
             raise ValueError(f"invalid log_level: {v}")
         return level
+
+    @model_validator(mode="after")
+    def _tool_budget_covers_result_cap(self) -> "Settings":
+        if self.tool_results_budget_chars < self.tool_result_max_chars:
+            raise ValueError(
+                "tool_results_budget_chars must be >= tool_result_max_chars "
+                f"({self.tool_results_budget_chars} < {self.tool_result_max_chars})"
+            )
+        return self
 
 
 @lru_cache

@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
-"""Run the full 5-step pipeline in one command (Phase 4 exit criterion).
+"""Run the full iterative pipeline in one command (Phases 4-6).
 
 Usage (from backend/):
   python scripts/run_pipeline.py "Should a two-person startup write down decisions?"
-  python scripts/run_pipeline.py "..." --verbose
+  python scripts/run_pipeline.py "..." --verbose     # + claims/verdicts/tool calls
   python scripts/run_pipeline.py "..." --json        # NDJSON RunEvents
+
+Tools are configured via AI_NEXUS_TOOL_* (see .env.example): file tools need
+AI_NEXUS_TOOL_FILES_ROOT; web_search needs AI_NEXUS_TOOL_WEB_SEARCH_ENABLED=true.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import sys
 from pathlib import Path
 
@@ -22,6 +26,7 @@ from app.config import get_settings  # noqa: E402
 from app.llm import get_provider  # noqa: E402
 from app.orchestrator import Orchestrator  # noqa: E402
 from app.runs import RunEvent, RunEventType, RunManager  # noqa: E402
+from app.tools import build_tool_registry  # noqa: E402
 
 def _fmt_step(event: RunEvent) -> str:
     message = event.message
@@ -45,6 +50,8 @@ def _fmt_step(event: RunEvent) -> str:
         detail = f"{len(message.claims)} claims"
     else:
         detail = ""
+    if message is not None and message.tool_results:
+        detail = f"tools={len(message.tool_results)} {detail}".strip()
     duration = (
         f"{event.duration_ms / 1000:6.1f}s"
         if event.duration_ms is not None
@@ -60,6 +67,13 @@ def _print_details(event: RunEvent) -> None:
     message = event.message
     if message is None:
         return
+    for call, result in zip(message.tool_calls or [], message.tool_results or []):
+        args = json.dumps(call.arguments, ensure_ascii=False)
+        if len(args) > 80:
+            args = args[:80] + "..."
+        status = "ok" if result.error is None else f"error={result.error}"
+        ms = f"{result.duration_ms:.1f}ms" if result.duration_ms is not None else ""
+        print(f"         tool: {call.name}({args}) → {status} {ms}")
     if message.decision is not None:
         print(f"         reason: {message.decision.reason}")
         if message.decision.instruction:
@@ -77,7 +91,8 @@ async def run(args: argparse.Namespace) -> int:
         settings = get_settings()
         logging_config.configure(settings.log_level)
         provider = get_provider(settings)
-        registry = build_registry(provider)
+        tool_registry = build_tool_registry(settings)
+        registry = build_registry(provider, tools=tool_registry)
         store = RunManager()
         orchestrator = Orchestrator(registry, store, max_rounds=settings.max_rounds)
     except Exception as exc:

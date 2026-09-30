@@ -148,6 +148,49 @@ def appless_run():
     return manager.create("payload test")
 
 
+def test_step_payload_carries_tool_trace():
+    """Phase 6: tool activity rides the step message into GET payloads (PRD §11.9)."""
+    from datetime import UTC, datetime
+
+    from app.api.runs import _run_payload
+    from app.llm.base import ToolCall
+    from app.schemas import ToolResult
+
+    run = appless_run()
+    run.steps.append(
+        StepRecord(
+            index=1, kind=StepKind.CRITIQUE, agent=AgentRole.SKEPTIC,
+            status=StepStatus.COMPLETED, started_at=datetime.now(UTC),
+            duration_ms=5.0,
+            message=AgentMessage(
+                from_agent=AgentRole.SKEPTIC, type=MessageType.CRITIQUE,
+                content="refuted",
+                tool_calls=[
+                    ToolCall(
+                        name="file_search",
+                        arguments={"query": "growth"},
+                        id="call1",
+                    )
+                ],
+                tool_results=[
+                    ToolResult(
+                        name="file_search",
+                        content='{"ok":true,"tool":"file_search","matches":[]}',
+                        error=None,
+                        duration_ms=1.2,
+                    )
+                ],
+            ),
+        )
+    )
+    message = _run_payload(run)["steps"][0]["message"]
+    assert message["tool_calls"][0]["name"] == "file_search"
+    assert message["tool_calls"][0]["arguments"] == {"query": "growth"}
+    assert message["tool_results"][0]["name"] == "file_search"
+    assert message["tool_results"][0]["error"] is None
+    assert message["tool_results"][0]["duration_ms"] == 1.2
+
+
 def test_post_while_active_returns_409(api):
     client, app = api
     blocker = app.state.runs.create("blocker")

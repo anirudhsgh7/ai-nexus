@@ -484,13 +484,15 @@ class Orchestrator:
 
             plan = await self._step(
                 run, StepKind.PLAN, AgentRole.MANAGER,
-                lambda: manager.run(task_text), round_=None,
+                lambda: manager.run(task_text, run_id=run_id), round_=None,
             )
 
             # ---- round 1 (fixed participation, Phase 4 compatibility) ----
             research = await self._step(
                 run, StepKind.RESEARCH, AgentRole.RESEARCHER,
-                lambda: researcher.run(task_text, context=plan.content),
+                lambda: researcher.run(
+                    task_text, context=plan.content, run_id=run_id
+                ),
                 round_=1,
             )
             pool.add(AgentRole.RESEARCHER, research.claims)
@@ -498,7 +500,9 @@ class Orchestrator:
 
             ideation = await self._step(
                 run, StepKind.IDEATE, AgentRole.IDEATOR,
-                lambda: ideator.run(task_text, context=plan.content),
+                lambda: ideator.run(
+                    task_text, context=plan.content, run_id=run_id
+                ),
                 round_=1,
             )
             pool.add(AgentRole.IDEATOR, ideation.claims)
@@ -507,7 +511,9 @@ class Orchestrator:
             if pool.claims:
                 critique = await self._step(
                     run, StepKind.CRITIQUE, AgentRole.SKEPTIC,
-                    lambda: skeptic.run(task_text, claims=pool.active_claims()),
+                    lambda: skeptic.run(
+                        task_text, claims=pool.active_claims(), run_id=run_id
+                    ),
                     round_=1,
                 )
                 pool.record_verdicts(critique.verdicts)
@@ -546,6 +552,7 @@ class Orchestrator:
                         context=summary,
                         message_type=MessageType.DECISION,
                         output_kind=OutputKind.DECISION,
+                        run_id=run_id,
                     ),
                     round_=rounds,
                 )
@@ -578,6 +585,7 @@ class Orchestrator:
                         task_text,
                         context=revision_context,
                         message_type=MessageType.REVISION,
+                        run_id=run_id,
                     ),
                     round_=rounds + 1,
                 )
@@ -595,7 +603,8 @@ class Orchestrator:
                     critique = await self._step(
                         run, StepKind.CRITIQUE, AgentRole.SKEPTIC,
                         lambda: skeptic.run(
-                            task_text, claims=[q.claim for q in added]
+                            task_text, claims=[q.claim for q in added],
+                            run_id=run_id,
                         ),
                         round_=next_round,
                     )
@@ -633,7 +642,8 @@ class Orchestrator:
             final = await self._step(
                 run, StepKind.SYNTHESIZE, AgentRole.MANAGER,
                 lambda: manager.run(
-                    task_text, context=context, message_type=MessageType.SYNTHESIS
+                    task_text, context=context, message_type=MessageType.SYNTHESIS,
+                    run_id=run_id,
                 ),
                 round_=None,
             )

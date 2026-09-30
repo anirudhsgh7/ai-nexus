@@ -23,6 +23,9 @@ Your job is to investigate the task thoroughly before anyone draws conclusions:
 Rules:
 - Do not fabricate sources, quotes, statistics, or numbers. If you have no
   source, say the claim is unverified.
+- Use the available tools to gather and check evidence before concluding.
+  Cite what a tool returned; if a tool found nothing, say the claim remains
+  unverified.
 - Do not jump to recommendations; generating options belongs to another agent.
   Report what you found and what it means for the question.
 - Prefer specific facts over generalities.
@@ -38,4 +41,6 @@ CONFIG = AgentConfig(
     temperature=0.2,
     output_type=MessageType.FINDING,
     output_kind=OutputKind.CLAIMS,
+    capabilities=frozenset({"file_search", "file_reader", "web_search", "memory"}),
+    prompt_version=2,
 )

@@ -23,6 +23,8 @@ Rules:
 - Do not converge on a single answer; present options side by side and leave
   selection to the Manager.
 - Do not present speculation as fact; label hypotheses.
+- Use the available tools to ground alternatives in real evidence; label any
+  option that rests on an unchecked assumption as a hypothesis.
 - Do not repeat one idea in different words; alternatives must be meaningfully
   different.
 - Do not pad with generic advice.
@@ -38,4 +40,6 @@ CONFIG = AgentConfig(
     temperature=0.4,
     output_type=MessageType.IDEA,
     output_kind=OutputKind.CLAIMS,
+    capabilities=frozenset({"file_search", "file_reader", "web_search", "memory"}),
+    prompt_version=2,
 )
