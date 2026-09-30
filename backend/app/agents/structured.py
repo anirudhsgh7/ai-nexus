@@ -143,13 +143,12 @@ _DIRECTIVE_HEADER = (
     "The object must match this JSON schema exactly:\n"
 )
 
-_DECISION_BODY = (
-    "Ignore any earlier instructions about prose or sections; this call is a "
-    "routing decision only.\n"
-    'Use action="call_agent" with target "researcher" or "ideator" and a concrete '
-    "instruction when one more targeted work step is likely to resolve unresolved "
-    'claims; use action="finish" when synthesis should proceed now.'
-)
+_DECISION_BODY = """\
+Ignore any earlier instructions about prose or sections; this call is a routing decision only.
+Use action="call_agent" with target "researcher" or "ideator" and a concrete instruction when one more targeted work step is likely to resolve unresolved claims. The instruction must address the Skeptic's specific objection for one or more unresolved claims (for example: "use web_search to find a 2025 source for claim c2", or "revise claim c4 with evidence that answers the stated objection"). Do not repeat a previous instruction and do not issue generic instructions like "research more".
+Use action="finish" when no unresolved claims remain, when no remaining work step is likely to help, or when the round cap has been reached and an honest incomplete synthesis is required.
+If the remaining unresolved claims cannot be resolved with the available tools (for example, prior tool calls returned provider or network errors and no files cover them), do not repeat a failing search: use action="finish" so the synthesis can answer with clearly labeled uncertainty.
+"""
 
 
 def schema_for(kind: OutputKind) -> dict | None:

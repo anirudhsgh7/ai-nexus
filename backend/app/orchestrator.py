@@ -287,7 +287,22 @@ def render_synthesis_context(
         skeptic_content if skeptic_content is not None else _SKIPPED_CRITIQUE_NOTE
     )
     board_body = board if board else "(none)"
+    instruction = (
+        "SYNTHESIS INSTRUCTION:\n"
+        "Answer the user's task directly and substantively using the materials "
+        "below. Write the answer itself; never describe what an answer should "
+        "contain or what analysis would be needed. Do not restate the task. "
+        "Use the findings, evidence, verdicts, and disagreements. Produce a "
+        "thorough, well-organized answer that includes concrete details from "
+        "the materials (named roles, skills, sources, and remaining "
+        "disagreements), and end with a clear recommendation or conclusion. "
+        "When evidence is thin or unverified, still give the best direct "
+        "answer possible from the provided claims and clearly label which "
+        "parts are unverified; do not make the missing evidence the whole "
+        "answer."
+    )
     return (
+        f"{instruction}\n\n"
         f"RESEARCHER FINDINGS:\n{researcher_content}\n\n"
         f"IDEATOR OPTIONS:\n{ideator_content}\n\n"
         f"SKEPTIC CRITIQUE:\n{skeptic_body}\n\n"
@@ -593,7 +608,16 @@ class Orchestrator:
                 added, dropped = pool.apply_revision(target, revision.claims)
                 worker_content[target] = revision.content
 
-                if not added and not dropped:
+                dropped_statements = {
+                    _normalize_statement(item.claim.statement) for item in dropped
+                }
+                new_statements = {
+                    _normalize_statement(item.claim.statement) for item in added
+                }
+                made_progress = bool(
+                    new_statements - dropped_statements
+                ) or bool(dropped and not added)
+                if not made_progress:
                     self._forced_finish(
                         run, "revision produced no progress", rounds
                     )

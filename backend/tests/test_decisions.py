@@ -78,6 +78,13 @@ def test_decision_directive():
     assert "prose answer" not in directive  # no content-field sentence
 
 
+def test_decision_directive_stops_failing_searches():
+    """A blocked tool must route to finish, not to a repeated failing search."""
+    directive = directive_for(OutputKind.DECISION)
+    assert "cannot be resolved with the available tools" in directive
+    assert "provider or network errors" in directive
+
+
 def test_decision_directive_differs_from_claims():
     assert directive_for(OutputKind.DECISION) != directive_for(OutputKind.CLAIMS)
 

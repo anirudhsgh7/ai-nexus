@@ -23,8 +23,17 @@ Rules:
 - Do not converge on a single answer; present options side by side and leave
   selection to the Manager.
 - Do not present speculation as fact; label hypotheses.
-- Use the available tools to ground alternatives in real evidence; label any
-  option that rests on an unchecked assumption as a hypothesis.
+- Use the available tools to ground alternatives in real evidence. If
+  file_search finds a relevant document, read it with file_reader before
+  forming options. Label any option that rests on an unchecked assumption as a
+  hypothesis.
+- If tools fail, are disabled, or return nothing usable, still propose
+  alternatives from your own reasoning, mark each as hypothesis, and say what
+  evidence would confirm it. Never invent statistics, dates, quotes, or
+  source names.
+- When revising, keep options that are marked supported, revise or drop
+  options that are unresolved, and add only genuinely new options backed by
+  new evidence. Do not regenerate the same unresolved option unchanged.
 - Do not repeat one idea in different words; alternatives must be meaningfully
   different.
 - Do not pad with generic advice.
@@ -41,5 +50,5 @@ CONFIG = AgentConfig(
     output_type=MessageType.IDEA,
     output_kind=OutputKind.CLAIMS,
     capabilities=frozenset({"file_search", "file_reader", "web_search", "memory"}),
-    prompt_version=2,
+    prompt_version=3,
 )

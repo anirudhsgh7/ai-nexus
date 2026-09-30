@@ -104,11 +104,22 @@ def test_instruction_length_budget():
 
 
 def test_prompt_version_and_display_names():
-    # Phase 6 touched the three worker prompts (tool-usage rules); Manager untouched.
-    assert [CONFIGS[r].prompt_version for r in AgentRole] == [1, 2, 2, 2]
+    # Phase 6 touched the three worker prompts; the fallback hardening bumped
+    # Manager, Researcher, and Ideator again.
+    assert [CONFIGS[r].prompt_version for r in AgentRole] == [2, 3, 3, 2]
     assert {c.display_name for c in CONFIGS.values()} == {
         "Manager", "Researcher", "Ideator", "Skeptic",
     }
+
+
+def test_tool_failure_fallback_is_declared():
+    """Agents must answer with labeled priors when tools return nothing."""
+    researcher = CONFIGS[AgentRole.RESEARCHER].instructions.lower()
+    assert "model prior knowledge" in researcher
+    assert "never fact" in researcher
+    ideator = CONFIGS[AgentRole.IDEATOR].instructions.lower()
+    assert "tools fail" in ideator
+    assert "hypothesis" in ideator
 
 
 @pytest.mark.parametrize("role", list(AgentRole))

@@ -373,6 +373,23 @@ def test_iteration_history_no_remaining():
     assert out.endswith("REMAINING UNRESOLVED:\n(none)")
 
 
+# ---------------------------------------------------------------- synthesis context
+
+def test_synthesis_context_forbids_meta_text():
+    """Thin-evidence answers must be answers, not descriptions of answers."""
+    context = render_synthesis_context(
+        "researcher prose", "ideator prose", None, "board body"
+    )
+    lowered = context.lower()
+    assert "write the answer itself" in lowered
+    assert "never describe what an answer should contain" in lowered
+    assert "do not make the missing evidence the whole answer" in lowered
+    # materials still included
+    assert "researcher prose" in context
+    assert "ideator prose" in context
+    assert "board body" in context
+
+
 # ---------------------------------------------------------------- best round
 
 def test_select_best_round_matrix():
