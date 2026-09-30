@@ -138,3 +138,33 @@ def test_tool_budget_must_cover_result_cap():
     # raising the cap alone trips the cross-field validator
     with pytest.raises(ValidationError):
         Settings(tool_result_max_chars=8000)
+
+
+# -------------------------------------------------------- persistence (Phase 7 PRD §6.9)
+
+def test_db_defaults(monkeypatch):
+    # the autouse conftest fixture sets AI_NEXUS_DB_PATH for app tests;
+    # the documented default is asserted with the env var cleared
+    monkeypatch.delenv("AI_NEXUS_DB_PATH", raising=False)
+    s = Settings()
+    assert s.db_path == "data/ai_nexus.db"
+    assert s.db_retention_runs == 500
+
+
+def test_db_settings_env_override(monkeypatch):
+    monkeypatch.setenv("AI_NEXUS_DB_PATH", "  /tmp/other.db ")
+    monkeypatch.setenv("AI_NEXUS_DB_RETENTION_RUNS", "0")
+    s = Settings()
+    assert s.db_path == "/tmp/other.db"  # whitespace stripped
+    assert s.db_retention_runs == 0
+
+
+def test_db_path_empty_disables_persistence(monkeypatch):
+    monkeypatch.setenv("AI_NEXUS_DB_PATH", "")
+    assert Settings().db_path == ""
+
+
+def test_db_retention_bounds():
+    assert Settings(db_retention_runs=0).db_retention_runs == 0
+    with pytest.raises(ValidationError):
+        Settings(db_retention_runs=-1)

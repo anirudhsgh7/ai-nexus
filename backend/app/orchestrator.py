@@ -523,8 +523,9 @@ class Orchestrator:
                                    round_=1)
 
             rounds = 1
-            run.rounds.append(
-                self._snapshot(rounds, pool, worker_content, skeptic_content)
+            self._store.record_round(
+                run.id,
+                self._snapshot(rounds, pool, worker_content, skeptic_content),
             )
 
             # ---- iteration loop ----
@@ -560,7 +561,7 @@ class Orchestrator:
                     self._forced_finish(run, "decision missing", rounds)
                     break
                 decision = normalize_decision(decision_msg.decision)
-                run.rounds[-1].decision = decision
+                self._store.record_round_decision(run.id, decision)
 
                 if decision.action is DecisionAction.FINISH:
                     break
@@ -611,8 +612,9 @@ class Orchestrator:
                     pool.record_verdicts(critique.verdicts)
                     skeptic_content = critique.content
                 rounds = next_round
-                run.rounds.append(
-                    self._snapshot(rounds, pool, worker_content, skeptic_content)
+                self._store.record_round(
+                    run.id,
+                    self._snapshot(rounds, pool, worker_content, skeptic_content),
                 )
 
             # ---- synthesis from the best round ----

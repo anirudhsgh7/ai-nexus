@@ -24,6 +24,13 @@ def _clean_settings_cache():
     clear_settings_cache()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_db(tmp_path, monkeypatch):
+    """Phase 7: every test's app writes to a per-test SQLite file, so
+    create_app() tests are hermetic and never touch backend/data/."""
+    monkeypatch.setenv("AI_NEXUS_DB_PATH", str(tmp_path / "test.db"))
+
+
 @pytest.fixture
 def settings() -> Settings:
     return Settings()

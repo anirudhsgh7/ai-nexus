@@ -78,3 +78,7 @@ def tool_call_end(logger: logging.Logger, **fields: Any) -> None:
 
 def tool_loop_end(logger: logging.Logger, **fields: Any) -> None:
     logger.info("tool_loop_end %s", _kv(**fields))
+
+
+def persistence_error(logger: logging.Logger, **fields: Any) -> None:
+    logger.error("persistence_error %s", _kv(**fields))

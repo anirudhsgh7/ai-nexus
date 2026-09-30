@@ -202,8 +202,11 @@ Thumbs.db
 *.sqlite3
 *.db
 *.db-journal
+*.db-wal
+*.db-shm
 *.sql
 dump.sql
+backend/data/
 postgres_data/
 mongo_data/
 redis_data/

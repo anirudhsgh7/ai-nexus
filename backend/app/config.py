@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     tool_web_search_enabled: bool = False
     tool_web_search_max_results: int = Field(default=5, ge=1, le=10)
 
+    # --- Persistence (Phase 7) ---
+    db_path: str = "data/ai_nexus.db"   # empty = no persistence (Phase 6 behavior)
+    db_retention_runs: int = Field(default=500, ge=0)  # 0 = keep everything
+
     cors_origins: list[str] = Field(
         default_factory=lambda: [
             "http://localhost:5173",
@@ -87,6 +91,11 @@ class Settings(BaseSettings):
         if level not in {"CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG"}:
             raise ValueError(f"invalid log_level: {v}")
         return level
+
+    @field_validator("db_path")
+    @classmethod
+    def _normalize_db_path(cls, v: str) -> str:
+        return v.strip()
 
     @model_validator(mode="after")
     def _tool_budget_covers_result_cap(self) -> "Settings":

@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app import logging_config  # noqa: E402
 from app.agents import build_registry  # noqa: E402
 from app.config import get_settings  # noqa: E402
+from app.db import build_run_store  # noqa: E402
 from app.llm import get_provider  # noqa: E402
 from app.orchestrator import Orchestrator  # noqa: E402
 from app.runs import RunEvent, RunEventType, RunManager  # noqa: E402
@@ -93,17 +94,20 @@ async def run(args: argparse.Namespace) -> int:
         provider = get_provider(settings)
         tool_registry = build_tool_registry(settings)
         registry = build_registry(provider, tools=tool_registry)
-        store = RunManager()
-        orchestrator = Orchestrator(registry, store, max_rounds=settings.max_rounds)
+        store = build_run_store(settings)
+        if store is not None:
+            print(f"persistence: {settings.db_path}", file=sys.stderr)
+        runs = RunManager(store=store)
+        orchestrator = Orchestrator(registry, runs, max_rounds=settings.max_rounds)
     except Exception as exc:
         print(f"setup error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
 
     try:
-        run_record = store.create(args.task)
-        queue, _ = store.subscribe(run_record.id)
+        run_record = runs.create(args.task)
+        queue, _ = runs.subscribe(run_record.id)
         task = asyncio.create_task(orchestrator.execute(run_record.id))
-        store.register_task(run_record.id, task)
+        runs.register_task(run_record.id, task)
 
         while True:
             event = await queue.get()

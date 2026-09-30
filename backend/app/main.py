@@ -23,6 +23,7 @@ from app.llm import (
 )
 from app.orchestrator import Orchestrator
 from app.runs import RunManager
+from app.db import PersistenceError, build_run_store
 from app.tools import build_tool_registry
 
 logger = logging.getLogger("ai_nexus.app")
@@ -33,7 +34,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     settings = get_settings()
     logging_config.configure(settings.log_level)
     provider: LLMProvider = get_provider(settings)
-    runs = RunManager()
+    store = build_run_store(settings)
+    runs = RunManager(store=store)
     tool_registry = build_tool_registry(settings)
     app.state.provider = provider
     app.state.settings = settings
@@ -43,12 +45,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.runs = runs
     app.state.orchestrator = Orchestrator(app.state.registry, runs)
     logger.info(
-        "app_start version=%s base_url=%s model=%s num_ctx=%s tools=%s",
+        "app_start version=%s base_url=%s model=%s num_ctx=%s tools=%s db=%s",
         settings.app_version,
         settings.ollama_base_url,
         settings.primary_model,
         settings.num_ctx,
         ",".join(tool_registry.names) or "none",
+        settings.db_path or "disabled",
     )
     try:
         yield
@@ -92,6 +95,21 @@ def create_app() -> FastAPI:
             content={
                 "error": {
                     "type": type(exc).__name__,
+                    "message": str(exc),
+                    "hint": exc.hint,
+                }
+            },
+        )
+
+    @fastapi_app.exception_handler(PersistenceError)
+    async def _persistence_error_handler(
+        request: Request, exc: PersistenceError
+    ) -> JSONResponse:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "error": {
+                    "type": "PersistenceError",
                     "message": str(exc),
                     "hint": exc.hint,
                 }
