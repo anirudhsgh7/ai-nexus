@@ -126,7 +126,15 @@ class OllamaProvider(LLMProvider):
             "model": model,
             "messages": [self._map_message(m) for m in messages],
             "stream": stream,
-            "options": {"temperature": temperature, "num_ctx": num_ctx},
+            "options": {
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+                # Defaults equal Ollama's own defaults (1.1 / 64), so this is
+                # byte-identical behavior until an operator tunes it
+                # (Phase 10 PRD §6.2).
+                "repeat_penalty": self._settings.repeat_penalty,
+                "repeat_last_n": self._settings.repeat_last_n,
+            },
             "keep_alive": keep_alive,
         }
         if max_tokens is not None:
@@ -244,6 +252,19 @@ class OllamaProvider(LLMProvider):
             if status == 404 and "not found" in body.lower():
                 model = _extract_missing_model(body)
                 return ModelNotFoundError(model)
+            if status == 500 and "token repeat limit" in body.lower():
+                # The model looped during a long (usually structured)
+                # generation — give the operator a tuning path instead of a
+                # raw upstream dump (Phase 10 PRD §6.2). No auto-retry.
+                return UpstreamError(
+                    f"Ollama returned {status}: {body}",
+                    status=status,
+                    hint=(
+                        "The model looped during generation. Re-run the task; "
+                        "if it recurs, raise AI_NEXUS_REPEAT_PENALTY (e.g. 1.2) "
+                        "or lower the step's max_tokens."
+                    ),
+                )
             return UpstreamError(f"Ollama returned {status}: {body}", status=status)
         if isinstance(exc, httpx.TransportError):
             return ProviderUnavailableError(str(exc))

@@ -7,7 +7,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.tools.base import Tool, ToolContext
+from app.tools.base import Tool, ToolContext, ok_envelope
 from app.tools.errors import ToolError
 from app.tools.search.cache import SearchCache
 from app.tools.search.constants import KNOWN_SEARCH_PROVIDERS
@@ -18,6 +18,10 @@ from app.tools.search.providers import (
     DuckDuckGoProvider,
     SearchOutcome,
 )
+
+#: Snippet cap used when the full envelope would overflow `result_max_chars`
+#: (Phase 10 PRD §6.3 — Phase 6 §6.5.3 requires every tool to self-limit).
+SNIPPET_LIMIT = 160
 
 _PROVIDER_CLASSES: dict[str, type] = {
     "ddg": DuckDuckGoProvider,
@@ -144,6 +148,36 @@ class WebSearchTool(Tool):
             f"web_search failed for all providers: {detail}. {_GUIDANCE}",
         )
 
+    def _fit(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Shrink results until the success envelope fits `result_max_chars`.
+
+        `provider`/`cached`/`attempts` are never touched — Phase 9 provenance
+        and the model both need them structured (Phase 8b showed previews
+        losing exactly those keys). Order: clip snippets, then drop results
+        from the tail (flagging `truncated`). If even an empty result list
+        cannot fit, return as-is: `Tool.call`'s overflow preview is the
+        documented last resort.
+        """
+        if len(ok_envelope(self.name, payload)) <= self._result_max_chars:
+            return payload
+        results = [dict(result) for result in payload.get("results", [])]
+        trimmed = False
+        for result in results:
+            snippet = result.get("snippet", "")
+            if len(snippet) > SNIPPET_LIMIT:
+                result["snippet"] = snippet[:SNIPPET_LIMIT].rstrip() + "…"
+                trimmed = True
+        while results and len(
+            ok_envelope(self.name, {**payload, "results": results})
+        ) > self._result_max_chars:
+            results.pop()
+            trimmed = True
+            payload["truncated"] = True
+        payload["results"] = results
+        if trimmed:
+            payload["snippets_trimmed"] = True
+        return payload
+
     def _success_payload(
         self,
         query: str,
@@ -152,11 +186,13 @@ class WebSearchTool(Tool):
         *,
         cached: bool,
     ) -> dict[str, Any]:
-        return {
-            "query": query,
-            "provider": outcome.provider,
-            "results": [dict(result) for result in outcome.results],
-            "truncated": outcome.truncated,
-            "attempts": list(attempts),
-            "cached": cached,
-        }
+        return self._fit(
+            {
+                "query": query,
+                "provider": outcome.provider,
+                "results": [dict(result) for result in outcome.results],
+                "truncated": outcome.truncated,
+                "attempts": list(attempts),
+                "cached": cached,
+            }
+        )

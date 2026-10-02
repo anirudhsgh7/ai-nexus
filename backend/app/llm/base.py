@@ -112,8 +112,10 @@ class RequestTimeoutError(LLMError):
 
 
 class UpstreamError(LLMError):
-    def __init__(self, message: str, *, status: int | None = None) -> None:
-        super().__init__(message)
+    def __init__(
+        self, message: str, *, status: int | None = None, hint: str = ""
+    ) -> None:
+        super().__init__(message, hint=hint)
         self.status = status
 
 

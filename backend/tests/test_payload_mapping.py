@@ -31,6 +31,9 @@ async def test_default_payload_always_contains_num_ctx(provider, chat_response):
     assert "num_predict" not in sent["options"]
     assert "tools" not in sent
     assert "format" not in sent
+    # Phase 10 §6.2: loop guards ride every payload at Ollama's own defaults
+    assert sent["options"]["repeat_penalty"] == 1.1
+    assert sent["options"]["repeat_last_n"] == 64
 
 
 @respx.mock

@@ -231,3 +231,50 @@ def test_db_retention_bounds():
     assert Settings(db_retention_runs=0).db_retention_runs == 0
     with pytest.raises(ValidationError):
         Settings(db_retention_runs=-1)
+
+
+# ------------------------------------------------------ shutdown (Phase 10 PRD §6.1)
+
+def test_shutdown_grace_default(settings: Settings):
+    assert settings.shutdown_grace_s == 5.0
+
+
+def test_shutdown_grace_bounds():
+    assert Settings(shutdown_grace_s=1.0).shutdown_grace_s == 1.0
+    assert Settings(shutdown_grace_s=60.0).shutdown_grace_s == 60.0
+    with pytest.raises(ValidationError):
+        Settings(shutdown_grace_s=0.5)
+    with pytest.raises(ValidationError):
+        Settings(shutdown_grace_s=61.0)
+
+
+def test_shutdown_grace_env_override(monkeypatch):
+    monkeypatch.setenv("AI_NEXUS_SHUTDOWN_GRACE_S", "12")
+    assert Settings().shutdown_grace_s == 12.0
+
+
+# -------------------------------------------- generation guards (Phase 10 §6.2)
+
+def test_repeat_guard_defaults(settings: Settings):
+    # equal to Ollama's own defaults -> byte-identical generation behavior
+    assert settings.repeat_penalty == 1.1
+    assert settings.repeat_last_n == 64
+
+
+def test_repeat_guard_bounds():
+    assert Settings(repeat_penalty=1.2).repeat_penalty == 1.2
+    assert Settings(repeat_last_n=-1).repeat_last_n == -1
+    with pytest.raises(ValidationError):
+        Settings(repeat_penalty=2.5)
+    with pytest.raises(ValidationError):
+        Settings(repeat_last_n=-2)
+    with pytest.raises(ValidationError):
+        Settings(repeat_last_n=4096)
+
+
+def test_repeat_guard_env_override(monkeypatch):
+    monkeypatch.setenv("AI_NEXUS_REPEAT_PENALTY", "1.2")
+    monkeypatch.setenv("AI_NEXUS_REPEAT_LAST_N", "128")
+    s = Settings()
+    assert s.repeat_penalty == 1.2
+    assert s.repeat_last_n == 128

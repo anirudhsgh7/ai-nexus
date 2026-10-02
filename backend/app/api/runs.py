@@ -18,6 +18,7 @@ from app.runs import (
     RunManager,
     RunRecord,
     RunStatus,
+    STREAM_CLOSED,
     StepRecord,
 )
 
@@ -199,6 +200,11 @@ async def stream_events(request: Request, run_id: str) -> Any:
                 except TimeoutError:
                     yield ": keep-alive\n\n"
                     continue
+                if event is STREAM_CLOSED:
+                    # Server shutdown: end cleanly so uvicorn can drain this
+                    # connection instead of waiting for the grace timeout
+                    # (Phase 10 PRD §6.1).
+                    return
                 yield _sse_frame(event)
                 if event.type in TERMINAL_EVENT_TYPES:
                     return

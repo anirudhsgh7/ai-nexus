@@ -54,6 +54,20 @@ async def test_upstream_500_maps_to_upstream_error(provider):
     with pytest.raises(UpstreamError) as exc_info:
         await provider.chat(_msgs())
     assert exc_info.value.status == 500
+    assert exc_info.value.hint == ""  # no tuning advice for a generic 500
+
+
+@respx.mock
+async def test_repeat_limit_500_gets_tuning_hint(provider):
+    """Phase 10 PRD §6.2: the observed loop failure names its escape hatch."""
+    respx.post(CHAT_URL).mock(return_value=httpx.Response(
+        500, text='{"error":"prediction aborted, token repeat limit reached"}'
+    ))
+    with pytest.raises(UpstreamError) as exc_info:
+        await provider.chat(_msgs())
+    assert exc_info.value.status == 500
+    assert "AI_NEXUS_REPEAT_PENALTY" in exc_info.value.hint
+    assert "Re-run" in exc_info.value.hint
 
 
 @respx.mock

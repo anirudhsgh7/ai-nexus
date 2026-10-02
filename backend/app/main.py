@@ -56,6 +56,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     try:
         yield
     finally:
+        # Phase 10 PRD §6.1: end SSE streams first so uvicorn's graceful
+        # shutdown can drain them, then cancel the run (its CancelledError
+        # handler marks the run FAILED with ServerShutdown), then the client.
+        closed = runs.close_streams()
+        logger.info("shutdown_streams_closed=%s", closed)
         active = runs.cancel_active_task()
         if active is not None:
             with suppress(asyncio.CancelledError):

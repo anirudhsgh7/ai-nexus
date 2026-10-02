@@ -14,7 +14,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -35,11 +35,17 @@ __all__ = [
     "RunManager",
     "RunRecord",
     "RunStatus",
+    "STREAM_CLOSED",
     "StepKind",
     "StepRecord",
     "StepStatus",
     "TERMINAL_EVENT_TYPES",
 ]
+
+#: Queue sentinel pushed by `RunManager.close_streams()` during shutdown so
+#: SSE handlers return immediately instead of idling a keep-alive window
+#: (Phase 10 PRD §6.1). Identity-compared, never serialized.
+STREAM_CLOSED: Final[object] = object()
 
 
 def _now() -> datetime:
@@ -316,6 +322,24 @@ class RunManager:
         subscribers.discard(queue)
         if not subscribers:
             self._subscribers.pop(run_id, None)
+
+    def close_streams(self) -> int:
+        """End every live SSE stream immediately; returns the queue count.
+
+        Called at the top of lifespan shutdown so stream handlers return
+        before uvicorn cancels them mid-frame (Phase 10 PRD §6.1). Idempotent:
+        a second call sees no subscribers and returns 0. The SSE generator
+        treats `STREAM_CLOSED` as end-of-stream — no event frame, no terminal
+        event (the run's own failure event is emitted by the cancelled
+        orchestrator task).
+        """
+        closed = 0
+        for queues in self._subscribers.values():
+            for queue in queues:
+                queue.put_nowait(STREAM_CLOSED)  # type: ignore[arg-type]
+                closed += 1
+        self._subscribers.clear()
+        return closed
 
     # ------------------------------------------------------------------ tasks
 

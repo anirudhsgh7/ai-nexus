@@ -62,6 +62,7 @@ def _tool(
     backoff_base_s: float = 0.001,
     cache_ttl_s: float = 900.0,
     max_results: int = 5,
+    result_max_chars: int = 2000,
     gate: object | None = None,
     cache: SearchCache | None = None,
     sleep: object | None = None,
@@ -69,7 +70,7 @@ def _tool(
     return WebSearchTool(
         max_results=max_results,
         timeout_s=45.0,
-        result_max_chars=2000,
+        result_max_chars=result_max_chars,
         providers=providers,
         retries=retries,
         backoff_base_s=backoff_base_s,
@@ -563,6 +564,75 @@ async def test_tool_acquires_gate_once_per_call():
         await tool.call({"query": "a"}, CTX)
         await tool.call({"query": "b"}, CTX)
     assert gate.calls == 2
+
+
+# -------------------------------------------------- self-limiting (Phase 10 §6.3)
+
+
+def _ddg_html(result_count: int = 5, snippet: str = "word " * 100) -> str:
+    parts = []
+    for i in range(result_count):
+        parts.append(
+            f'<a class="result__a" '
+            f'href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2F{i}">'
+            f"Title {i}</a>"
+            f'<a class="result__snippet" href="#">{snippet}</a>'
+        )
+    return "".join(parts)
+
+
+@respx.mock
+async def test_self_limits_snippets_under_cap():
+    respx.post(DDG_URL).mock(
+        return_value=httpx.Response(200, text=_ddg_html())
+    )
+    async with httpx.AsyncClient() as client:
+        tool = _tool(client, max_results=5, result_max_chars=1200)
+        result = await tool.call({"query": "long snippets"}, CTX)
+    assert result.error is None
+    assert len(result.content) <= 1200
+    payload = json.loads(result.content)
+    assert payload["snippets_trimmed"] is True
+    assert payload["provider"] == "ddg"          # provenance survives trimming
+    assert payload["cached"] is False
+    assert payload["attempts"] == ["ddg"]
+    for entry in payload["results"]:
+        assert len(entry["snippet"]) <= 161      # 160 chars + ellipsis
+        assert entry["snippet"].endswith("…")
+
+
+@respx.mock
+async def test_self_limits_drops_tail_results_to_fit():
+    respx.post(DDG_URL).mock(
+        return_value=httpx.Response(200, text=_ddg_html(result_count=8))
+    )
+    async with httpx.AsyncClient() as client:
+        tool = _tool(client, max_results=8, result_max_chars=700)
+        result = await tool.call({"query": "many results"}, CTX)
+    assert result.error is None
+    assert len(result.content) <= 700
+    payload = json.loads(result.content)
+    assert payload["snippets_trimmed"] is True
+    assert payload["truncated"] is True          # results were dropped
+    assert 1 <= len(payload["results"]) < 8
+    assert payload["provider"] == "ddg"
+
+
+@respx.mock
+async def test_short_payloads_pass_through_unchanged():
+    respx.post(DDG_URL).mock(
+        return_value=httpx.Response(200, text=FIXTURE.read_text())
+    )
+    async with httpx.AsyncClient() as client:
+        payload = json.loads(
+            (await _tool(client, result_max_chars=2000).call(
+                {"query": "growth"}, CTX
+            )).content
+        )
+    # under the cap: no self-limit keys, nothing rewritten
+    assert "snippets_trimmed" not in payload
+    assert payload["truncated"] is False
+    assert len(payload["results"]) == 2
 
 
 # ---------------------------------------------------------- construction guards

@@ -161,6 +161,7 @@ coverage/
 .pytest_cache/
 # Local benchmark runs (measured per machine, not source)
 benchmark_results*.json
+eval_results*.json
 .hypothesis/
 .tox/
 .nox/

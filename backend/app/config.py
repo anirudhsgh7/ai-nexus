@@ -41,6 +41,12 @@ class Settings(BaseSettings):
 
     default_temperature: float = Field(default=0.0, ge=0.0, le=2.0)
 
+    # Generation-loop guards (Phase 10): defaults equal Ollama's own defaults
+    # (1.1 / 64) — behavior unchanged until an operator tunes them after a
+    # "token repeat limit reached" failure.
+    repeat_penalty: float = Field(default=1.1, ge=0.0, le=2.0)
+    repeat_last_n: int = Field(default=64, ge=-1, le=2048)
+
     # --- Tools (Phase 6) ---
     tool_max_steps: int = Field(default=5, ge=1, le=10)
     tool_timeout_s: float = Field(default=20.0, gt=0.0, le=120.0)
@@ -63,6 +69,11 @@ class Settings(BaseSettings):
     # --- Persistence (Phase 7) ---
     db_path: str = "data/ai_nexus.db"   # empty = no persistence (Phase 6 behavior)
     db_retention_runs: int = Field(default=500, ge=0)  # 0 = keep everything
+
+    # --- Shutdown (Phase 10) ---
+    # uvicorn may wait at most this long for open connections (SSE streams)
+    # before force-closing them and running lifespan shutdown (PRD §6.1).
+    shutdown_grace_s: float = Field(default=5.0, ge=1.0, le=60.0)
 
     cors_origins: list[str] = Field(
         default_factory=lambda: [
