@@ -1,6 +1,7 @@
 import { formatDuration, pluralize } from "../format";
 import { stepSummary, type StepEntry } from "../reducer";
 import type { AgentMessage, ToolCall, ToolResult } from "../types";
+import { DecisionRecord } from "./DecisionRecord";
 import { ErrorCard } from "./ErrorCard";
 
 function toolLine(
@@ -38,9 +39,10 @@ function structureLine(message: AgentMessage): string | null {
 }
 
 /**
- * One expandable step. Phase 8 shows prose, structure counts, the decision
- * record, and tool-call one-liners; claim/verdict evidence displays are
- * Phase 9 (PRD §6.7 boundary).
+ * One expandable step. Phase 9 adds the full decision record (instruction,
+ * confidence, guard chip). Claim/verdict evidence stays in the round panels:
+ * message-local claim ids must never be rendered next to run-level verdict
+ * ids (Phase 9 PRD §6.5).
  */
 export function StepCard({ entry }: { entry: StepEntry }) {
   const message = entry.message;
@@ -74,14 +76,11 @@ export function StepCard({ entry }: { entry: StepEntry }) {
         {message !== null && message.content.trim() !== "" ? (
           <pre className="prose">{message.content}</pre>
         ) : null}
-        {message?.decision !== null && message?.decision !== undefined ? (
-          <p className="decision-line">
-            <span className="label">decision</span> {message.decision.action}
-            {message.decision.target !== null
-              ? ` → ${message.decision.target}`
-              : ""}{" "}
-            — {message.decision.reason}
-          </p>
+        {message?.decision != null ? (
+          <DecisionRecord
+            decision={message.decision}
+            skipped={entry.skipped && entry.kind === "decide"}
+          />
         ) : null}
         {structure !== null ? (
           <p className="structure-line">{structure}</p>

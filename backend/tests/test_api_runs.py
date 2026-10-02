@@ -107,7 +107,7 @@ def test_post_creates_run_and_completes(api):
 
 
 def test_run_payload_round_summaries_round_trip():
-    """GET shape for rounds: counts + decision summary (PRD §6.8)."""
+    """GET shape for rounds: counts + FULL decision (Phase 9 PRD §6.8/§6.1)."""
     from datetime import UTC, datetime
 
     from app.api.runs import _run_payload
@@ -135,10 +135,119 @@ def test_run_payload_round_summaries_round_trip():
             "decision": {
                 "action": "call_agent",
                 "target": "researcher",
+                "instruction": "Find a source.",
                 "reason": "gap",
+                "confidence": 0.8,
             },
+            "claims": [],
+            "origins": {},
+            "verdicts": [],
         }
     ]
+    # not completed yet -> nothing was selected
+    assert payload["selected_round"] is None
+
+
+def test_round_payload_evidence_round_trip():
+    """Snapshot claims/origins/verdicts survive serialization verbatim."""
+    from app.api.runs import _run_payload
+    from app.runs import RoundSnapshot
+    from app.schemas import (
+        Claim,
+        ClaimStatus,
+        ClaimVerdict,
+        Evidence,
+        Verdict,
+    )
+
+    run = appless_run()
+    run.rounds.append(
+        RoundSnapshot(
+            round_number=1,
+            claims=[
+                Claim(
+                    id="c1",
+                    statement="Growth was 40% in 2025.",
+                    status=ClaimStatus.UNVERIFIED,
+                    confidence=0.55,
+                    evidence=[
+                        Evidence(source="company blog", quote="revenue up 40%")
+                    ],
+                ),
+                Claim(
+                    id="c2",
+                    statement="Rivals grew slower.",
+                    status=ClaimStatus.ASSUMPTION,
+                ),
+            ],
+            origins={"c1": AgentRole.RESEARCHER, "c2": AgentRole.IDEATOR},
+            verdicts=[
+                Verdict(
+                    claim_id="c1",
+                    verdict=ClaimVerdict.REFUTED,
+                    objection="marketing post, not audited",
+                    evidence=[Evidence(source="audit report", quote="23%")],
+                ),
+                Verdict(
+                    claim_id="c2",
+                    verdict=ClaimVerdict.UNVERIFIABLE,
+                    objection="no comparison data",
+                ),
+            ],
+            worker_content={},
+            skeptic_content="",
+            supported_count=0,
+            unresolved_count=2,
+        )
+    )
+    payload = _run_payload(run)
+    round_payload = payload["rounds"][0]
+    assert round_payload["claims"][0] == {
+        "id": "c1",
+        "statement": "Growth was 40% in 2025.",
+        "status": "unverified",
+        "confidence": 0.55,
+        "evidence": [{"source": "company blog", "quote": "revenue up 40%"}],
+    }
+    assert round_payload["claims"][1]["evidence"] == []
+    assert round_payload["origins"] == {"c1": "researcher", "c2": "ideator"}
+    assert round_payload["verdicts"][0] == {
+        "claim_id": "c1",
+        "verdict": "refuted",
+        "objection": "marketing post, not audited",
+        "evidence": [{"source": "audit report", "quote": "23%"}],
+    }
+    assert round_payload["verdicts"][1]["evidence"] == []
+    assert payload["selected_round"] is None
+
+
+def test_selected_round_uses_best_round_rule():
+    """selected_round is select_best_round's pick — ties go to the later round."""
+    from app.api.runs import _run_payload
+    from app.runs import RoundSnapshot, RunStatus
+
+    def _snap(number: int, supported: int, unresolved: int) -> RoundSnapshot:
+        return RoundSnapshot(
+            round_number=number, claims=[], origins={}, verdicts=[],
+            worker_content={}, skeptic_content="",
+            supported_count=supported, unresolved_count=unresolved,
+        )
+
+    run = appless_run()
+    run.rounds.extend([_snap(1, 3, 2), _snap(2, 6, 2)])
+    # running -> null (nothing selected yet)
+    assert _run_payload(run)["selected_round"] is None
+    # completed -> the net-score winner (6-2 > 3-2)
+    run.status = RunStatus.COMPLETED
+    assert _run_payload(run)["selected_round"] == 2
+    # tie -> later round
+    tied = appless_run()
+    tied.rounds.extend([_snap(1, 3, 2), _snap(2, 3, 2)])
+    tied.status = RunStatus.COMPLETED
+    assert _run_payload(tied)["selected_round"] == 2
+    # failed run -> null even with snapshots
+    run.status = RunStatus.FAILED
+    assert _run_payload(run)["selected_round"] is None
 
 
 def appless_run():

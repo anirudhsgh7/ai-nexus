@@ -491,3 +491,282 @@ details[open] > .step-summary::after {
 .empty-hint {
   margin: 8px 0 24px;
 }
+
+/* ------------------------------------------------------- Phase 9 evidence */
+
+.round-panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  border-left: 3px solid var(--accent);
+}
+
+.round-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+}
+
+.round-panel-head::-webkit-details-marker {
+  display: none;
+}
+
+.round-panel-head::after {
+  content: "▸";
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+details.round-panel[open] > .round-panel-head::after {
+  transform: rotate(90deg);
+}
+
+.round-panel-title {
+  font-weight: 700;
+}
+
+.round-counts {
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.round-panel-body {
+  padding: 4px 14px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.evidence-heading {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  margin: 12px 0 6px;
+}
+
+.claim-list,
+.retired-claims,
+.unresolved-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.unresolved-list,
+.minority-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.unresolved-list li,
+.minority-list li {
+  font-size: 13px;
+  padding: 4px 0;
+}
+
+.unresolved-origin,
+.minority-origin {
+  color: var(--muted);
+}
+
+.claim-card {
+  background: #f8fafc;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+
+.claim-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  list-style: none;
+  font-size: 13px;
+}
+
+.claim-head::-webkit-details-marker {
+  display: none;
+}
+
+.claim-head::after {
+  content: "▸";
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 0.15s ease;
+}
+
+details.claim-card[open] > .claim-head::after {
+  transform: rotate(90deg);
+}
+
+.claim-id {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.claim-origin {
+  font-size: 12px;
+}
+
+.confidence {
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.claim-body {
+  padding: 2px 10px 10px;
+  border-top: 1px dashed var(--border);
+}
+
+.claim-statement {
+  margin: 8px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.claim-verdict {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.verdict-objection {
+  font-size: 13px;
+  color: var(--text);
+}
+
+.citation {
+  margin: 6px 0;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+
+.citation-label {
+  display: block;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.citation-source {
+  margin: 2px 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.citation-quote {
+  margin: 4px 0;
+  padding: 4px 10px;
+  background: #f1f5f9;
+  border-radius: 6px;
+  color: #334155;
+  font-size: 13px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.tool-provenance {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  color: #334155;
+  margin: 4px 0;
+  overflow-wrap: anywhere;
+}
+
+/* claim status chips */
+.claim-fact {
+  background: #dcfce7;
+  color: #166534;
+}
+.claim-assumption {
+  background: #fef3c7;
+  color: #92400e;
+}
+.claim-hypothesis {
+  background: #ede9fe;
+  color: #5b21b6;
+}
+.claim-opinion {
+  background: #e2e8f0;
+  color: #334155;
+}
+.claim-inference {
+  background: #dbeafe;
+  color: #1e40af;
+}
+.claim-unverified {
+  background: #f1f5f9;
+  color: #475569;
+}
+
+/* verdict chips */
+.verdict-supported {
+  background: #dcfce7;
+  color: #166534;
+}
+.verdict-refuted {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.verdict-unverifiable {
+  background: #fef3c7;
+  color: #92400e;
+}
+.verdict-none {
+  background: #f1f5f9;
+  color: #64748b;
+}
+
+.selected-chip {
+  background: var(--accent);
+  color: #ffffff;
+}
+
+.guard-chip {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.retired-chip {
+  background: #f1f5f9;
+  color: #64748b;
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
+.retired-claims .claim-card {
+  opacity: 0.85;
+  border-style: dashed;
+}
+
+.agent-text.agent-unknown {
+  color: var(--muted);
+  font-weight: 500;
+}
+
+/* minority report in the final card */
+.minority-report {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.minority-heading {
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  margin: 0 0 6px;
+}

@@ -1,12 +1,14 @@
 import { useEffect, useState } from "react";
 
 import { agentLabel, formatElapsed } from "../format";
+import { evidenceFor, type RoundEvidence } from "../evidence";
 import {
   currentAgent,
   stepGroups,
   type RunView,
   type StepEntry,
 } from "../reducer";
+import { RoundPanel } from "./RoundPanel";
 import { StepCard } from "./StepCard";
 
 function ConnectionBadge({ state }: { state: RunView["connection"] }) {
@@ -18,18 +20,42 @@ function ConnectionBadge({ state }: { state: RunView["connection"] }) {
   return null;
 }
 
-function Group({ label, steps }: { label: string; steps: StepEntry[] }) {
+/** First non-null step round in the group (Setup/Wrap-up groups stay null). */
+function groupRound(steps: StepEntry[]): number | null {
+  for (const step of steps) {
+    if (step.round !== null) return step.round;
+  }
+  return null;
+}
+
+function Group({
+  label,
+  steps,
+  evidence,
+}: {
+  label: string;
+  steps: StepEntry[];
+  evidence: RoundEvidence[];
+}) {
+  const roundEvidence = evidenceFor(evidence, groupRound(steps));
   return (
     <section className="round-group" aria-label={label}>
       <h3 className="round-label">{label}</h3>
       {steps.map((step) => (
         <StepCard key={step.index} entry={step} />
       ))}
+      {roundEvidence !== null ? <RoundPanel evidence={roundEvidence} /> : null}
     </section>
   );
 }
 
-export function RunFeed({ view }: { view: RunView }) {
+export function RunFeed({
+  view,
+  evidence,
+}: {
+  view: RunView;
+  evidence: RoundEvidence[];
+}) {
   const [now, setNow] = useState<number>(() => Date.now());
 
   useEffect(() => {
@@ -65,7 +91,12 @@ export function RunFeed({ view }: { view: RunView }) {
       </div>
       <div className="feed" aria-live="polite">
         {stepGroups(view).map((group) => (
-          <Group key={group.label} label={group.label} steps={group.steps} />
+          <Group
+            key={group.label}
+            label={group.label}
+            steps={group.steps}
+            evidence={evidence}
+          />
         ))}
       </div>
     </div>

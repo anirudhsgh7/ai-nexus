@@ -45,13 +45,20 @@ MESSAGE_KEYS = {
 # frontend/src/types.ts — RunPayload / StepPayload / RunSummary
 RUN_PAYLOAD_KEYS = {
     "run_id", "task", "status", "created_at", "started_at", "finished_at",
-    "duration_ms", "steps", "rounds", "final_message", "error",
+    "duration_ms", "steps", "rounds", "selected_round", "final_message", "error",
 }
 STEP_PAYLOAD_KEYS = {
     "index", "kind", "agent", "status", "round", "duration_ms", "skipped",
     "message", "error",
 }
 SUMMARY_KEYS = {"run_id", "status", "task_preview", "created_at", "duration_ms"}
+
+# frontend/src/types.ts — RoundSummary (Phase 9 evidence payload)
+ROUND_KEYS = {
+    "round", "supported", "unresolved", "decision",
+    "claims", "origins", "verdicts",
+}
+DECISION_KEYS = {"action", "target", "instruction", "reason", "confidence"}
 
 EVENT_TYPES = {
     "run_started", "step_started", "step_completed", "run_completed",
@@ -71,6 +78,67 @@ def test_agent_message_keys():
 def test_run_payload_keys():
     run = RunManager().create("contract check")
     assert RUN_PAYLOAD_KEYS <= set(_run_payload(run))
+
+
+def test_round_payload_keys():
+    """Phase 9: the evidence fields the UI consumes on every round."""
+    from app.runs import RoundSnapshot, RunStatus
+    from app.schemas import (
+        Claim,
+        ClaimStatus,
+        ClaimVerdict,
+        DecisionAction,
+        Evidence,
+        ManagerDecision,
+        Verdict,
+    )
+
+    run = RunManager().create("contract check")
+    run.rounds.append(
+        RoundSnapshot(
+            round_number=1,
+            claims=[
+                Claim(
+                    id="c1",
+                    statement="s",
+                    status=ClaimStatus.FACT,
+                    evidence=[Evidence(source="doc")],
+                )
+            ],
+            origins={"c1": AgentRole.RESEARCHER},
+            verdicts=[
+                Verdict(
+                    claim_id="c1",
+                    verdict=ClaimVerdict.SUPPORTED,
+                    objection="holds",
+                )
+            ],
+            worker_content={},
+            skeptic_content="",
+            supported_count=1,
+            unresolved_count=0,
+            decision=ManagerDecision(
+                action=DecisionAction.FINISH,
+                target=None,
+                instruction="",
+                reason="all resolved",
+                confidence=0.9,
+            ),
+        )
+    )
+    run.status = RunStatus.COMPLETED
+    payload = _run_payload(run)
+    round_payload = payload["rounds"][0]
+    assert ROUND_KEYS <= set(round_payload)
+    assert set(round_payload["decision"]) == DECISION_KEYS
+    assert round_payload["origins"] == {"c1": "researcher"}
+    assert set(round_payload["claims"][0]) == {
+        "id", "statement", "status", "confidence", "evidence",
+    }
+    assert set(round_payload["verdicts"][0]) == {
+        "claim_id", "verdict", "objection", "evidence",
+    }
+    assert payload["selected_round"] == 1
 
 
 def test_step_payload_keys():

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { ApiError, createRun, getHealth, getRun, listRuns } from "./api";
+import { buildEvidence, unresolvedAtSynthesis } from "./evidence";
 import {
   createRunView,
   foldEvent,
@@ -14,7 +15,12 @@ import { RunFeed } from "./components/RunFeed";
 import { RunHistory } from "./components/RunHistory";
 import { StatusBanner } from "./components/StatusBanner";
 import { TaskForm } from "./components/TaskForm";
-import type { HealthPayload, RunSummary } from "./types";
+import type { HealthPayload, RoundSummary, RunSummary } from "./types";
+
+/** Event kinds after which round snapshots change (bounded: ≤ 2 per round). */
+function changesRounds(kind: string | null): boolean {
+  return kind === "critique" || kind === "decide";
+}
 
 export default function App() {
   const [health, setHealth] = useState<HealthPayload | null>(null);
@@ -25,7 +31,27 @@ export default function App() {
   const [formError, setFormError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [actionError, setActionError] = useState<ApiError | null>(null);
+  // Round evidence arrives via GET (not SSE): snapshots only exist on disk
+  // after a critique/decision, so Phase 9 refreshes the detail payload at
+  // those points and on terminal events — no polling (Phase 9 PRD §6.7).
+  const [rounds, setRounds] = useState<RoundSummary[]>([]);
+  const [selectedRound, setSelectedRound] = useState<number | null>(null);
+  const roundsReqRef = useRef(0);
   const streamRef = useRef<RunStreamHandle | null>(null);
+
+  const refreshRounds = useCallback(async (runId: string): Promise<void> => {
+    const token = roundsReqRef.current + 1;
+    roundsReqRef.current = token;
+    try {
+      const payload = await getRun(runId);
+      if (token !== roundsReqRef.current) return; // superseded / run switched
+      setRounds(payload.rounds);
+      setSelectedRound(payload.selected_round);
+    } catch (error) {
+      // Keep whatever evidence we already have; the feed itself is unaffected.
+      console.error("round refresh failed", error);
+    }
+  }, []);
 
   const refreshHistory = useCallback(async () => {
     try {
@@ -61,6 +87,9 @@ export default function App() {
 
   const startRunView = useCallback(async (runId: string): Promise<void> => {
     const payload = await getRun(runId); // existence check before streaming
+    roundsReqRef.current += 1; // invalidate any in-flight round refresh
+    setRounds(payload.rounds);
+    setSelectedRound(payload.selected_round);
     streamRef.current?.close();
     const base = createRunView(runId, payload.task);
     setView(setConnection(base, "connecting"));
@@ -71,6 +100,13 @@ export default function App() {
             ? foldEvent(previous, event)
             : previous,
         );
+        if (
+          (event.type === "step_completed" && changesRounds(event.kind)) ||
+          event.type === "run_completed" ||
+          event.type === "run_failed"
+        ) {
+          void refreshRounds(runId);
+        }
       },
       onState: (state) => {
         setView((previous) =>
@@ -80,7 +116,7 @@ export default function App() {
         );
       },
     });
-  }, []);
+  }, [refreshRounds]);
 
   const handleSubmit = useCallback(
     async (task: string): Promise<void> => {
@@ -152,6 +188,16 @@ export default function App() {
   const runDisabled =
     view?.status === "running" || health?.status === "unavailable";
 
+  // Pure join: backend snapshots + step trace -> panel data (no I/O here).
+  const evidence = useMemo(
+    () => buildEvidence(rounds, view?.steps ?? [], selectedRound),
+    [rounds, view?.steps, selectedRound],
+  );
+  const unresolved = useMemo(
+    () => unresolvedAtSynthesis(evidence),
+    [evidence],
+  );
+
   return (
     <div className="app">
       <header className="app-header">
@@ -172,12 +218,14 @@ export default function App() {
 
       {view !== null ? (
         <>
-          <RunFeed view={view} />
+          <RunFeed view={view} evidence={evidence} />
           {view.status === "completed" && view.finalMessage !== null ? (
             <FinalResult
               message={view.finalMessage}
               startedAt={view.startedAt}
               finishedAt={view.finishedAt}
+              selectedRound={selectedRound}
+              unresolved={unresolved}
             />
           ) : null}
           {view.status === "failed" && view.error !== null ? (

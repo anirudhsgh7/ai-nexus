@@ -9,13 +9,15 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
-from app.orchestrator import Orchestrator
+from app.orchestrator import Orchestrator, select_best_round
 from app.runs import (
     TERMINAL_EVENT_TYPES,
+    RoundSnapshot,
     RunActiveError,
     RunEvent,
     RunManager,
     RunRecord,
+    RunStatus,
     StepRecord,
 )
 
@@ -47,16 +49,6 @@ def _run_not_found(run_id: str) -> JSONResponse:
     return _error_response(404, "RunNotFoundError", f"unknown run: {run_id}")
 
 
-def _decision_summary(decision: Any) -> dict[str, Any] | None:
-    if decision is None:
-        return None
-    return {
-        "action": decision.action.value,
-        "target": decision.target.value if decision.target else None,
-        "reason": decision.reason,
-    }
-
-
 def _step_payload(step: StepRecord) -> dict[str, Any]:
     return {
         "index": step.index,
@@ -71,6 +63,29 @@ def _step_payload(step: StepRecord) -> dict[str, Any]:
     }
 
 
+def _round_payload(snap: RoundSnapshot) -> dict[str, Any]:
+    """One round: counts + decision + the evidence the UI renders (Phase 9 §6.1).
+
+    `claims`/`origins`/`verdicts` come straight from the persisted
+    `RoundSnapshot` (run-level ids, already qualified by the orchestrator).
+    The decision is the full `ManagerDecision` — the Phase 5 summary omitted
+    `instruction` and `confidence`, which is exactly what Phase 9 surfaces.
+    """
+    return {
+        "round": snap.round_number,
+        "supported": snap.supported_count,
+        "unresolved": snap.unresolved_count,
+        "decision": (
+            snap.decision.model_dump(mode="json") if snap.decision else None
+        ),
+        "claims": [claim.model_dump(mode="json") for claim in snap.claims],
+        "origins": {cid: role.value for cid, role in snap.origins.items()},
+        "verdicts": [
+            verdict.model_dump(mode="json") for verdict in snap.verdicts
+        ],
+    }
+
+
 def _run_payload(run: RunRecord) -> dict[str, Any]:
     return {
         "run_id": run.id,
@@ -81,15 +96,15 @@ def _run_payload(run: RunRecord) -> dict[str, Any]:
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "duration_ms": run.duration_ms,
         "steps": [_step_payload(s) for s in run.steps],
-        "rounds": [
-            {
-                "round": snap.round_number,
-                "supported": snap.supported_count,
-                "unresolved": snap.unresolved_count,
-                "decision": _decision_summary(snap.decision),
-            }
-            for snap in run.rounds
-        ],
+        "rounds": [_round_payload(snap) for snap in run.rounds],
+        # The synthesis round: computed by the canonical Phase 5 rule, never
+        # re-derived client-side. Null until a run actually completed with
+        # round snapshots (a failed/guarded run has nothing to select).
+        "selected_round": (
+            select_best_round(run.rounds).round_number
+            if run.status is RunStatus.COMPLETED and run.rounds
+            else None
+        ),
         "final_message": (
             run.final_message.model_dump(mode="json") if run.final_message else None
         ),

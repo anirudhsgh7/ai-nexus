@@ -1,5 +1,5 @@
 /**
- * Wire types (Phase 8 PRD §6.3).
+ * Wire types (Phase 8 PRD §6.3, extended by Phase 9 PRD §6.2).
  *
  * Backend field names are used verbatim (snake_case): no mapping layer, no
  * camelCase transform — zero mapping bugs and greppable names. Drift against
@@ -143,7 +143,10 @@ export interface RoundSummary {
   round: number;
   supported: number;
   unresolved: number;
-  decision: unknown;
+  decision: ManagerDecision | null;
+  claims: Claim[];
+  origins: Record<string, AgentRole>;
+  verdicts: Verdict[];
 }
 
 export interface RunPayload {
@@ -156,6 +159,7 @@ export interface RunPayload {
   duration_ms: number | null;
   steps: StepPayload[];
   rounds: RoundSummary[];
+  selected_round: number | null;
   final_message: AgentMessage | null;
   error: ErrorInfo | null;
 }

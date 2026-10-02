@@ -19,6 +19,7 @@ import type {
 } from "../types";
 import failedTrace from "./fixtures/failed_trace.json";
 import iterativeTrace from "./fixtures/iterative_trace.json";
+import runDetail from "./fixtures/run_detail.json";
 import runSummaries from "./fixtures/run_summaries.json";
 
 vi.mock("../api", async (importOriginal) => {
@@ -39,6 +40,9 @@ import { openRunStream } from "../sse";
 const events = iterativeTrace as unknown as RunEvent[];
 const failedEvents = failedTrace as unknown as RunEvent[];
 const summaries = runSummaries as unknown as RunSummary[];
+
+/** Resolution hook for the deferred getRun in the stale-refresh test. */
+let deferredResolve: ((payload: RunPayload) => void) | null = null;
 
 const mockCreateRun = vi.mocked(api.createRun);
 const mockListRuns = vi.mocked(api.listRuns);
@@ -79,6 +83,7 @@ function payload(runId: string, task: string): RunPayload {
     duration_ms: null,
     steps: [],
     rounds: [],
+    selected_round: null,
     final_message: null,
     error: null,
   };
@@ -112,6 +117,7 @@ beforeEach(() => {
   mockGetRun.mockReset();
   mockGetHealth.mockReset();
   mockOpenStream.mockReset();
+  deferredResolve = null;
   mockGetHealth.mockResolvedValue(health());
   mockListRuns.mockResolvedValue([]);
 });
@@ -301,5 +307,211 @@ describe("history", () => {
     expect(await screen.findByText("Is the 40% growth claim correct?")).toBeInTheDocument();
     expect(screen.getAllByText("completed").length).toBeGreaterThan(0);
     expect(screen.getAllByText("running").length).toBeGreaterThan(0);
+  });
+});
+
+// ------------------------------------------------------ Phase 9: evidence
+
+const detail = runDetail as unknown as RunPayload;
+
+async function submitAndWatch(task: string) {
+  const stream = stubStream();
+  render(<App />);
+  const user = userEvent.setup();
+  await user.type(screen.getByLabelText("Task"), task);
+  await user.click(screen.getByRole("button", { name: "Run" }));
+  await waitFor(() => expect(stream.opened.length).toBeGreaterThan(0));
+  return stream;
+}
+
+describe("evidence panels (Phase 9)", () => {
+  it("renders round panels with verdicts, provenance, and the selected round", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-1", status: "running" });
+    mockGetRun.mockResolvedValue({ ...detail, run_id: "run-1" });
+    const stream = await submitAndWatch(detail.task);
+    stream.emit(events);
+
+    expect(await screen.findByText("FINAL RESULT")).toBeInTheDocument();
+    // one panel per persisted snapshot round — rounds arrive via the terminal
+    // refresh, so the first render may not have them yet
+    const panels = await screen.findAllByLabelText(/^Round \d+ evidence$/);
+    expect(panels).toHaveLength(detail.rounds.length);
+    // counts + exactly one selected round
+    expect(
+      screen.getAllByText(/\d+ supported · \d+ unresolved/),
+    ).toHaveLength(detail.rounds.length);
+    expect(await screen.findByText("SELECTED")).toBeInTheDocument();
+    // verdicts render as text labels (not color-only)
+    expect(
+      screen.getAllByText(/^(Supported|Refuted|Unverifiable|Not evaluated)$/)
+        .length,
+    ).toBeGreaterThan(0);
+    // the final card names the selected round's unresolved minority
+    expect(
+      await screen.findByText(/FINAL EVIDENCE · selected round \d+/),
+    ).toBeInTheDocument();
+    // decisions carry reason + instruction
+    expect(screen.getAllByText(/^decision$/).length).toBeGreaterThan(0);
+
+    // tool provenance: the SSE trace carries step messages, so a critique
+    // re-emitted with its (real, 8b-shaped) tool envelope renders it
+    const critique = events.find(
+      (e) => e.type === "step_completed" && e.kind === "critique",
+    );
+    expect(critique?.message).not.toBeNull();
+    stream.emit([
+      {
+        ...critique!,
+        seq: Math.max(...events.map((e) => e.seq)) + 1,
+        message: {
+          ...critique!.message!,
+          tool_calls: [
+            {
+              name: "web_search",
+              arguments: { query: "INRIX 2025 traffic scorecard" },
+              id: null,
+            },
+          ],
+          tool_results: [
+            {
+              name: "web_search",
+              content: JSON.stringify({
+                ok: true,
+                tool: "web_search",
+                query: "INRIX 2025 traffic scorecard",
+                provider: "ddg",
+                results: [{ title: "t", url: "u", snippet: "s" }],
+                truncated: false,
+                attempts: ["ddg"],
+                cached: true,
+              }),
+              error: null,
+              duration_ms: 12.5,
+            },
+          ],
+        },
+      },
+    ]);
+    expect(
+      await screen.findByText(/source: ddg \(cached\)/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByText(/web_search\("INRIX 2025 traffic scorecard"\)/)
+        .length,
+    ).toBeGreaterThan(0);
+  });
+
+  it("refreshes the detail payload on critique/decide steps and terminal events", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-1", status: "running" });
+    mockGetRun.mockResolvedValue(payload("run-1", "Should we build X?"));
+    const stream = await submitAndWatch("Should we build X?");
+    const before = mockGetRun.mock.calls.length;
+    stream.emit(events);
+
+    expect(await screen.findByText("FINAL RESULT")).toBeInTheDocument();
+    // 2 critiques + 2 decides + 1 terminal refresh (no polling in between)
+    await waitFor(() =>
+      expect(mockGetRun.mock.calls.length).toBe(before + 5),
+    );
+  });
+
+  it("labels a synthetic guard decision on a skipped decide step", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-1", status: "running" });
+    mockGetRun.mockResolvedValue(payload("run-1", "Guard task"));
+    const stream = await submitAndWatch("Guard task");
+    stream.emit([
+      {
+        seq: 7,
+        type: "step_completed",
+        run_id: "run-1",
+        ts: "2026-10-02T12:00:00.000Z",
+        step: 7,
+        kind: "decide",
+        agent: "manager",
+        round: 2,
+        task: null,
+        message: {
+          id: "guard-msg",
+          from_agent: "manager",
+          to_agent: null,
+          type: "decision",
+          content: "",
+          claims: null,
+          verdicts: null,
+          decision: {
+            action: "finish",
+            target: null,
+            instruction: "",
+            reason: "revision produced no progress",
+            confidence: 0,
+          },
+          confidence: null,
+          tool_calls: null,
+          tool_results: null,
+          round: 2,
+          created_at: "2026-10-02T12:00:00.000Z",
+        },
+        duration_ms: 0,
+        skipped: true,
+        error: null,
+      },
+    ]);
+
+    expect(await screen.findByText("guard")).toBeInTheDocument();
+    expect(
+      screen.getByText(/revision produced no progress/),
+    ).toBeInTheDocument();
+    // no snapshot exists for the aborted round -> no fabricated panel
+    expect(screen.queryAllByLabelText(/^Round \d+ evidence$/)).toHaveLength(0);
+  });
+
+  it("shows no evidence panels for a run without round snapshots", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-2", status: "running" });
+    mockGetRun.mockResolvedValue(payload("run-2", "What is 2+2?"));
+    const stream = await submitAndWatch("What is 2+2?");
+    stream.emit(failedEvents);
+
+    expect(
+      await screen.findByText(/RUN FAILED · RequestTimeoutError/),
+    ).toBeInTheDocument();
+    expect(screen.queryAllByLabelText(/^Round \d+ evidence$/)).toHaveLength(0);
+  });
+
+  it("ignores a stale round refresh after switching runs", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-a", status: "running" });
+    mockListRuns.mockResolvedValue(summaries);
+    // initial fetch for run-a, then one deferred refresh, then run-b payloads
+    mockGetRun
+      .mockResolvedValueOnce(payload("run-a", "Task A"))
+      .mockImplementationOnce(
+        () =>
+          new Promise<RunPayload>((resolve) => {
+            deferredResolve = resolve;
+          }),
+      )
+      .mockResolvedValue(payload(summaries[0]?.run_id ?? "run-b", "Task B"));
+    const stream = await submitAndWatch("Task A");
+
+    // a decisive step fires the (deferred) refresh for run-a
+    const critique = events.find(
+      (e) => e.type === "step_completed" && e.kind === "critique",
+    );
+    expect(critique).toBeDefined();
+    stream.emit([critique!]);
+    await waitFor(() => expect(deferredResolve).not.toBeNull());
+
+    // switch runs while that refresh is in flight
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: /Should we build X\?/ }),
+    );
+    await waitFor(() =>
+      expect(stream.opened).toEqual(["run-a", summaries[0]?.run_id]),
+    );
+
+    // the stale response (carrying run-a's rounds) must be discarded
+    deferredResolve!({ ...detail, run_id: "run-a" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryAllByLabelText(/^Round \d+ evidence$/)).toHaveLength(0);
   });
 });
