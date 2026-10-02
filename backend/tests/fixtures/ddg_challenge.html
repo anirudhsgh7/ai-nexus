@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>DuckDuckGo</title>
+</head>
+<body>
+  <div class="anomaly-modal__mask"></div>
+  <div class="anomaly-modal anomaly-modal--visible">
+    <div class="anomaly-modal__content">
+      <h1>Unfortunately, bots use DuckDuckGo too.</h1>
+      <p>Please complete the following challenge to confirm this search was made by a human.</p>
+      <form class="challenge-form" action="//duckduckgo.com/anomaly.js" method="post">
+        <input type="hidden" name="cc" value="botnet">
+        <input type="submit" value="Continue">
+      </form>
+    </div>
+  </div>
+  <script src="//duckduckgo.com/dist/wpm.main.js"></script>
+</body>
+</html>

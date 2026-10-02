@@ -140,6 +140,69 @@ def test_tool_budget_must_cover_result_cap():
         Settings(tool_result_max_chars=8000)
 
 
+# ------------------------------------- web search reliability (Phase 8b PRD §6.9)
+
+WEB_SEARCH_DEFAULTS = {
+    "tool_web_search_providers": ["ddg", "bing"],
+    "tool_web_search_min_interval_s": 3.0,
+    "tool_web_search_retries": 2,
+    "tool_web_search_backoff_base_s": 2.0,
+    "tool_web_search_timeout_s": 45.0,
+    "tool_web_search_cache_ttl_s": 900.0,
+    "tool_web_search_region": "us-en",
+}
+
+
+def test_web_search_defaults(settings: Settings):
+    for field, expected in WEB_SEARCH_DEFAULTS.items():
+        assert getattr(settings, field) == expected, field
+
+
+def test_web_search_env_override(monkeypatch):
+    monkeypatch.setenv("AI_NEXUS_TOOL_WEB_SEARCH_ENABLED", "true")
+    monkeypatch.setenv("AI_NEXUS_TOOL_WEB_SEARCH_PROVIDERS", '["bing","ddg"]')
+    monkeypatch.setenv("AI_NEXUS_TOOL_WEB_SEARCH_RETRIES", "4")
+    monkeypatch.setenv("AI_NEXUS_TOOL_WEB_SEARCH_MIN_INTERVAL_S", "5")
+    monkeypatch.setenv("AI_NEXUS_TOOL_WEB_SEARCH_REGION", "uk-en")
+    s = Settings()
+    assert s.tool_web_search_providers == ["bing", "ddg"]  # order preserved
+    assert s.tool_web_search_retries == 4
+    assert s.tool_web_search_min_interval_s == 5.0
+    assert s.tool_web_search_region == "uk-en"
+
+
+def test_web_search_provider_list_dedupes_and_normalizes():
+    s = Settings(tool_web_search_providers=["DDG", "ddg", " bing "])
+    assert s.tool_web_search_providers == ["ddg", "bing"]
+
+
+def test_web_search_unknown_provider_rejected():
+    with pytest.raises(ValidationError, match="unknown web search provider"):
+        Settings(tool_web_search_providers=["ddg", "mojeek"])
+
+
+def test_web_search_empty_providers_fail_only_when_enabled():
+    assert Settings(tool_web_search_providers=[]).tool_web_search_providers == []
+    with pytest.raises(ValidationError, match="at least one provider"):
+        Settings(tool_web_search_enabled=True, tool_web_search_providers=[])
+
+
+def test_web_search_bounds():
+    for bad in (
+        {"tool_web_search_min_interval_s": 0.1},
+        {"tool_web_search_min_interval_s": 31.0},
+        {"tool_web_search_retries": -1},
+        {"tool_web_search_retries": 6},
+        {"tool_web_search_backoff_base_s": 0.1},
+        {"tool_web_search_backoff_base_s": 20.0},
+        {"tool_web_search_timeout_s": 4.0},
+        {"tool_web_search_timeout_s": 121.0},
+        {"tool_web_search_cache_ttl_s": -1.0},
+    ):
+        with pytest.raises(ValidationError):
+            Settings(**bad)
+
+
 # -------------------------------------------------------- persistence (Phase 7 PRD §6.9)
 
 def test_db_defaults(monkeypatch):

@@ -115,6 +115,15 @@ async def test_live_web_search_returns_results():
         return
     payload = json.loads(result.content)
     assert payload["ok"] is True
+    if "provider" not in payload:
+        # A large result set can legitimately overflow Tool.call's result cap
+        # and come back as the preview envelope (Phase 6 behavior); provenance
+        # then lives inside the preview string, so only structure is asserted.
+        assert payload.get("truncated") is True
+        assert "preview" in payload
+        return
+    assert payload["provider"] in {"ddg", "bing"}
+    assert payload["attempts"], "a successful search names the providers attempted"
     assert isinstance(payload["results"], list)
     for entry in payload["results"]:
         assert entry["title"] and entry["url"]

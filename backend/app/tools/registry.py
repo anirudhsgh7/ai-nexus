@@ -20,7 +20,7 @@ from app.tools.errors import ToolNotRegisteredError
 from app.tools.file_reader import FileReaderTool
 from app.tools.file_search import FileSearchTool
 from app.tools.memory import MemoryTool
-from app.tools.web_search import WebSearchTool
+from app.tools.web_search import KNOWN_SEARCH_PROVIDERS, WebSearchTool
 
 logger = logging.getLogger("ai_nexus.tools.registry")
 
@@ -109,11 +109,27 @@ def build_tool_registry(settings: Settings) -> ToolRegistry:
         )
     )
     if settings.tool_web_search_enabled:
+        providers = settings.tool_web_search_providers
+        unknown = [p for p in providers if p not in KNOWN_SEARCH_PROVIDERS]
+        if unknown:
+            known = ", ".join(sorted(KNOWN_SEARCH_PROVIDERS))
+            raise ValueError(
+                f"unknown web search provider(s): {', '.join(unknown)} "
+                f"(known: {known})"
+            )
         tools.append(
             WebSearchTool(
                 max_results=settings.tool_web_search_max_results,
-                timeout_s=settings.tool_timeout_s,
+                # web_search owns its (longer) retry-aware budget; every other
+                # tool keeps the generic tool_timeout_s.
+                timeout_s=settings.tool_web_search_timeout_s,
                 result_max_chars=settings.tool_result_max_chars,
+                providers=providers,
+                retries=settings.tool_web_search_retries,
+                backoff_base_s=settings.tool_web_search_backoff_base_s,
+                region=settings.tool_web_search_region,
+                min_interval_s=settings.tool_web_search_min_interval_s,
+                cache_ttl_s=settings.tool_web_search_cache_ttl_s,
             )
         )
     return ToolRegistry(tools)

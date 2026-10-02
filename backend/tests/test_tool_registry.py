@@ -103,3 +103,46 @@ def test_build_web_flag_toggle():
 
 def test_memory_tool_always_registered():
     assert "memory" in build_tool_registry(Settings(tool_files_root="")).names
+
+
+# ------------------------------------------- web_search wiring (Phase 8b PRD §4/§6.9)
+
+
+def test_build_web_search_uses_its_own_timeout():
+    settings = Settings(
+        tool_web_search_enabled=True,
+        tool_timeout_s=20.0,
+        tool_web_search_timeout_s=77.0,
+    )
+    tool = build_tool_registry(settings).get("web_search")
+    assert tool._timeout_s == 77.0, "web_search overrides the generic timeout"
+    assert tool._timeout_s != settings.tool_timeout_s
+
+
+def test_build_web_search_unknown_provider_fails_fast():
+    # bypass Settings validation to prove the registry's defensive check
+    settings = Settings.model_construct(
+        tool_files_root="",
+        tool_web_search_enabled=True,
+        tool_web_search_providers=["mojeek"],
+        tool_web_search_max_results=5,
+        tool_web_search_retries=2,
+        tool_web_search_backoff_base_s=2.0,
+        tool_web_search_region="us-en",
+        tool_web_search_min_interval_s=3.0,
+        tool_web_search_cache_ttl_s=900.0,
+        tool_web_search_timeout_s=45.0,
+        tool_timeout_s=20.0,
+        tool_result_max_chars=2000,
+        tool_results_budget_chars=6000,
+    )
+    with pytest.raises(ValueError, match="unknown web search provider"):
+        build_tool_registry(settings)
+
+
+def test_build_web_search_provider_order_is_config_driven():
+    settings = Settings(
+        tool_web_search_enabled=True, tool_web_search_providers=["bing", "ddg"]
+    )
+    tool = build_tool_registry(settings).get("web_search")
+    assert [provider.name for provider in tool._providers] == ["bing", "ddg"]

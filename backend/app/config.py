@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Any
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -49,6 +49,16 @@ class Settings(BaseSettings):
     tool_files_root: str = ""           # empty = file tools disabled
     tool_web_search_enabled: bool = False
     tool_web_search_max_results: int = Field(default=5, ge=1, le=10)
+    # Phase 8b: reliability settings behind the same flag.
+    tool_web_search_providers: list[str] = Field(
+        default_factory=lambda: ["ddg", "bing"]
+    )
+    tool_web_search_min_interval_s: float = Field(default=3.0, ge=0.5, le=30.0)
+    tool_web_search_retries: int = Field(default=2, ge=0, le=5)
+    tool_web_search_backoff_base_s: float = Field(default=2.0, ge=0.5, le=15.0)
+    tool_web_search_timeout_s: float = Field(default=45.0, ge=5.0, le=120.0)
+    tool_web_search_cache_ttl_s: float = Field(default=900.0, ge=0.0, le=86400.0)
+    tool_web_search_region: str = "us-en"
 
     # --- Persistence (Phase 7) ---
     db_path: str = "data/ai_nexus.db"   # empty = no persistence (Phase 6 behavior)
@@ -96,6 +106,43 @@ class Settings(BaseSettings):
     @classmethod
     def _normalize_db_path(cls, v: str) -> str:
         return v.strip()
+
+    @field_validator("tool_web_search_providers")
+    @classmethod
+    def _validate_web_search_providers(
+        cls, v: list[str], info: ValidationInfo
+    ) -> list[str]:
+        # Lazy import keeps `app.config` free of a module-level `app.tools`
+        # dependency (registry imports config; tools importing config would
+        # otherwise be a cycle).
+        from app.tools.web_search import KNOWN_SEARCH_PROVIDERS
+
+        cleaned: list[str] = []
+        for raw in v:
+            name = str(raw).strip().lower()
+            if name and name not in cleaned:
+                cleaned.append(name)
+        unknown = [name for name in cleaned if name not in KNOWN_SEARCH_PROVIDERS]
+        if unknown:
+            known = ", ".join(sorted(KNOWN_SEARCH_PROVIDERS))
+            raise ValueError(
+                f"unknown web search provider(s): {', '.join(unknown)} "
+                f"(known: {known})"
+            )
+        if not cleaned and info.data.get("tool_web_search_enabled"):
+            raise ValueError(
+                "tool_web_search_providers must list at least one provider "
+                "when tool_web_search_enabled is true"
+            )
+        return cleaned
+
+    @field_validator("tool_web_search_region")
+    @classmethod
+    def _validate_region(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("tool_web_search_region must be non-empty")
+        return v
 
     @model_validator(mode="after")
     def _tool_budget_covers_result_cap(self) -> "Settings":

@@ -80,5 +80,9 @@ def tool_loop_end(logger: logging.Logger, **fields: Any) -> None:
     logger.info("tool_loop_end %s", _kv(**fields))
 
 
+def web_search_attempt(logger: logging.Logger, **fields: Any) -> None:
+    logger.info("web_search_attempt %s", _kv(**fields))
+
+
 def persistence_error(logger: logging.Logger, **fields: Any) -> None:
     logger.error("persistence_error %s", _kv(**fields))
