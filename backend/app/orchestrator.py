@@ -595,6 +595,7 @@ class Orchestrator:
                 revision_context = render_revision_context(
                     decision.instruction, own_board
                 )
+                next_round = rounds + 1
                 revision = await self._step(
                     run, StepKind.REVISE, target,
                     lambda: self._registry.get(target).run(
@@ -603,7 +604,7 @@ class Orchestrator:
                         message_type=MessageType.REVISION,
                         run_id=run_id,
                     ),
-                    round_=rounds + 1,
+                    round_=next_round,
                 )
                 added, dropped = pool.apply_revision(target, revision.claims)
                 worker_content[target] = revision.content
@@ -618,12 +619,14 @@ class Orchestrator:
                     new_statements - dropped_statements
                 ) or bool(dropped and not added)
                 if not made_progress:
+                    # The synthetic decide closes the round the revise opened;
+                    # stamp it `next_round` so step grouping stays monotonic
+                    # (rounds, revise, decide all carry the same round).
                     self._forced_finish(
-                        run, "revision produced no progress", rounds
+                        run, "revision produced no progress", next_round
                     )
                     break
 
-                next_round = rounds + 1
                 if added:
                     critique = await self._step(
                         run, StepKind.CRITIQUE, AgentRole.SKEPTIC,

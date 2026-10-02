@@ -727,6 +727,18 @@ async def test_guard_no_progress_revision_forces_finish():
     synthetic = run.steps[-2]
     assert synthetic.skipped
     assert synthetic.message.decision.reason == "revision produced no progress"
+    # The synthetic decide closes the round the revise opened: both carry the
+    # pending round (2), never the previous round — group labels stay monotonic
+    # (Setup / Round 1 / Round 2 / Wrap-up, no phantom Round 1 after Round 2).
+    revise = run.steps[-3]
+    assert revise.kind is StepKind.REVISE
+    assert revise.round == 2
+    assert synthetic.round == 2
+    # An aborted round is not recorded as a snapshot: best-round selection
+    # keeps round 1 (identical counts would otherwise tiebreak to a round with
+    # no evaluated claims).
+    assert len(run.rounds) == 1
+    assert [s.round for s in run.steps] == [None, 1, 1, 1, 1, 2, 2, None]
 
 
 async def test_guard_step_cap_forces_finish(monkeypatch):
