@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { agentLabel, formatElapsed } from "../format";
+import { accountabilityFor, verificationFor } from "../audits";
 import { evidenceFor, type RoundEvidence } from "../evidence";
 import {
   currentAgent,
@@ -8,8 +9,10 @@ import {
   type RunView,
   type StepEntry,
 } from "../reducer";
+import { AccountabilityPanel } from "./AccountabilityPanel";
 import { RoundPanel } from "./RoundPanel";
 import { StepCard } from "./StepCard";
+import { VerificationPanel } from "./VerificationPanel";
 
 function ConnectionBadge({ state }: { state: RunView["connection"] }) {
   if (state === "live") return <span className="conn conn-live">live</span>;
@@ -65,6 +68,8 @@ export function RunFeed({
   }, [view.status]);
 
   const agent = currentAgent(view);
+  const verification = verificationFor(view.steps);
+  const accountability = accountabilityFor(view.steps);
 
   return (
     <div className="run-view">
@@ -98,6 +103,12 @@ export function RunFeed({
             evidence={evidence}
           />
         ))}
+        {verification !== null ? (
+          <VerificationPanel report={verification} />
+        ) : null}
+        {accountability !== null ? (
+          <AccountabilityPanel report={accountability} />
+        ) : null}
       </div>
     </div>
   );

@@ -72,6 +72,8 @@ def test_verdicts_directive():
     assert compact in directive
     assert 'In "verdicts"' in directive
     assert "CLAIMS TO EVALUATE" in directive
+    # the never-blank objection rule lives with the schema it governs
+    assert "objection must be a non-empty" in directive
 
 
 # ---------------------------------------------------------------- extraction
@@ -227,7 +229,277 @@ def test_parse_verdicts_missing_required_rejected():
 def test_correction_message_format():
     msg = correction_message(["claim c2 was not evaluated", "bad json"])
     assert msg == (
-        "Your previous response was rejected: claim c2 was not evaluated; bad json.\n"
+        "Your previous response was rejected: "
+        "claim c2 was not evaluated -> fix: add exactly one verdict entry for "
+        "every claim id under CLAIMS TO EVALUATE; bad json.\n"
         "Respond again with ONLY a single valid JSON object matching the required "
         "schema.\nNo markdown, no commentary."
     )
+
+
+def test_correction_message_fix_hints_for_known_violations():
+    """Each recurring violation names the concrete fix (Phase 11 §18) — the
+    one allowed retry must be actionable, not a restatement."""
+    cases = {
+        "claim c1 has status=fact but no evidence":
+            "use status=unverified/assumption/hypothesis instead of fact",
+        "claim c1 marked supported without evidence":
+            "verdict=unverifiable instead of supported",
+        "verdict for c1 has no objection":
+            "write a non-empty objection sentence",
+        "claim c3 verified without recording checked evidence":
+            "list every source you actually checked in evidence_checked",
+        "claim c3 partially verified without evidence":
+            "use unverifiable if you checked nothing",
+    }
+    for problem, needle in cases.items():
+        msg = correction_message([problem])
+        assert f"{problem} -> fix: " in msg, problem
+        assert needle in msg, problem
+    # unknown problems pass through without a fabricated fix
+    unrecognised = "some brand-new violation"
+    assert f"{unrecognised}." in correction_message([unrecognised])
+    assert "-> fix:" not in correction_message([unrecognised])
+
+
+# ------------------------------------------------- Phase 11 audit output kinds
+
+def test_audit_schema_for_kinds():
+    from app.agents.structured import ACCOUNTABILITY_SCHEMA, VERIFICATION_SCHEMA
+
+    assert schema_for(OutputKind.VERIFICATION) is VERIFICATION_SCHEMA
+    assert schema_for(OutputKind.ACCOUNTABILITY) is ACCOUNTABILITY_SCHEMA
+
+
+def test_verification_schema_shape():
+    from app.agents.structured import VERIFICATION_SCHEMA
+    from app.schemas import VerificationStatus
+
+    assert VERIFICATION_SCHEMA["required"] == ["content", "claims"]
+    item = VERIFICATION_SCHEMA["properties"]["claims"]["items"]
+    assert set(item["required"]) == {
+        "claim_id", "verification_status", "evidence_checked",
+        "supporting_evidence", "contradicting_evidence",
+        "source_references", "explanation", "confidence",
+    }
+    assert item["properties"]["verification_status"]["enum"] == [
+        s.value for s in VerificationStatus
+    ]
+    assert item["properties"]["confidence"] == {
+        "type": "number", "minimum": 0, "maximum": 1,
+    }
+    assert item["properties"]["supporting_evidence"]["items"]["required"] == ["source"]
+
+
+def test_accountability_schema_shape():
+    from app.agents.structured import ACCOUNTABILITY_SCHEMA
+    from app.schemas import (
+        AccountabilityFlagKind,
+        AccountabilityStatus,
+        FlagSeverity,
+    )
+
+    assert ACCOUNTABILITY_SCHEMA["required"] == [
+        "content", "trace_completeness", "final_claim_provenance",
+        "flags", "overall_status", "summary",
+    ]
+    prov = ACCOUNTABILITY_SCHEMA["properties"]["final_claim_provenance"]["items"]
+    assert prov["required"] == ["claim_id", "origin", "evidence_count"]
+    assert prov["properties"]["origin"]["enum"] == [
+        "manager", "researcher", "ideator", "skeptic",
+    ]
+    flag = ACCOUNTABILITY_SCHEMA["properties"]["flags"]["items"]
+    assert flag["properties"]["kind"]["enum"] == [k.value for k in AccountabilityFlagKind]
+    assert flag["properties"]["severity"]["enum"] == [s.value for s in FlagSeverity]
+    assert ACCOUNTABILITY_SCHEMA["properties"]["overall_status"]["enum"] == [
+        s.value for s in AccountabilityStatus
+    ]
+
+
+def test_verification_directive():
+    directive = directive_for(OutputKind.VERIFICATION)
+    from app.agents.structured import VERIFICATION_SCHEMA
+
+    assert json.dumps(VERIFICATION_SCHEMA, separators=(",", ":")) in directive
+    assert "prior verdict is context, never proof" in directive
+    assert "one entry per claim id" in directive
+
+
+def test_accountability_directive():
+    directive = directive_for(OutputKind.ACCOUNTABILITY)
+    from app.agents.structured import ACCOUNTABILITY_SCHEMA
+
+    assert json.dumps(ACCOUNTABILITY_SCHEMA, separators=(",", ":")) in directive
+    assert "must appear in" in directive
+    assert "do not judge answer quality" in directive
+
+
+def test_parse_verification():
+    from app.agents.structured import parse_verification
+    from app.schemas import VerificationStatus
+
+    raw = json.dumps({
+        "content": "checked the file",
+        "claims": [
+            {
+                "claim_id": "c1",
+                "verification_status": "verified",
+                "evidence_checked": ["growth_report.txt"],
+                "supporting_evidence": [
+                    {"source": "growth_report.txt", "quote": "23%"}
+                ],
+                "contradicting_evidence": [],
+                "source_references": ["growth_report.txt"],
+                "explanation": "File states 23%.",
+                "confidence": 0.9,
+            },
+            {
+                "claim_id": "c2",
+                "verification_status": "unverifiable",
+                "evidence_checked": [],
+                "supporting_evidence": [],
+                "contradicting_evidence": [],
+                "source_references": [],
+                "explanation": "No source exists.",
+                "confidence": 0.3,
+            },
+        ],
+    })
+    result = parse_verification(raw)
+    assert result.claims is None and result.verdicts is None
+    assert result.verification is not None
+    assert [c.claim_id for c in result.verification.claims] == ["c1", "c2"]
+    assert (
+        result.verification.claims[0].verification_status
+        is VerificationStatus.VERIFIED
+    )
+    assert result.verification.claims[0].supporting_evidence[0].quote == "23%"
+    assert result.verification.claims[1].confidence == 0.3
+
+
+def test_parse_verification_unknown_enum_rejected():
+    from app.agents.structured import parse_verification
+
+    raw = json.dumps({
+        "content": "x",
+        "claims": [{
+            "claim_id": "c1", "verification_status": "probably_true",
+            "evidence_checked": [], "supporting_evidence": [],
+            "contradicting_evidence": [], "source_references": [],
+            "explanation": "x", "confidence": 0.5,
+        }],
+    })
+    with pytest.raises(ValidationError):
+        parse_verification(raw)
+
+
+def test_parse_verification_missing_required_rejected():
+    from app.agents.structured import parse_verification
+
+    raw = json.dumps({
+        "content": "x",
+        "claims": [{"claim_id": "c1", "verification_status": "verified"}],
+    })
+    with pytest.raises(ValidationError):
+        parse_verification(raw)
+
+
+def test_parse_accountability():
+    from app.agents.structured import parse_accountability
+    from app.schemas import (
+        AccountabilityFlagKind,
+        AccountabilityStatus,
+        FlagSeverity,
+    )
+
+    raw = json.dumps({
+        "content": "trace audit",
+        "trace_completeness": True,
+        "final_claim_provenance": [
+            {"claim_id": "c1", "origin": "researcher",
+             "verdict": "supported", "evidence_count": 2},
+            {"claim_id": "c2", "origin": "ideator", "evidence_count": 0},
+        ],
+        "flags": [{
+            "kind": "retry_activity", "severity": "info",
+            "refs": ["4"], "explanation": "one structured retry",
+        }],
+        "overall_status": "clean",
+        "summary": "no gaps",
+    })
+    result = parse_accountability(raw)
+    assert result.accountability is not None
+    report = result.accountability
+    assert report.trace_completeness is True
+    assert report.overall_status is AccountabilityStatus.CLEAN
+    assert report.final_claim_provenance[0].origin.value == "researcher"
+    assert report.final_claim_provenance[1].verdict is None
+    assert report.flags[0].kind is AccountabilityFlagKind.RETRY_ACTIVITY
+    assert report.flags[0].severity is FlagSeverity.INFO
+
+
+def test_parse_accountability_unknown_enum_rejected():
+    from app.agents.structured import parse_accountability
+
+    raw = json.dumps({
+        "content": "x", "trace_completeness": True,
+        "final_claim_provenance": [],
+        "flags": [{"kind": "made_up_kind", "severity": "info",
+                   "refs": [], "explanation": "x"}],
+        "overall_status": "clean", "summary": "x",
+    })
+    with pytest.raises(ValidationError):
+        parse_accountability(raw)
+
+
+def test_parse_verification_ignores_unknown_fields():
+    """Extra keys the model invents are tolerated (DTO extra=ignore, PRD §9.1)."""
+    from app.agents.structured import parse_verification
+    from app.schemas import VerificationStatus
+
+    raw = json.dumps({
+        "content": "checked",
+        "model_note": "I am confident",
+        "claims": [{
+            "claim_id": "c1",
+            "verification_status": "unverifiable",
+            "evidence_checked": [], "supporting_evidence": [],
+            "contradicting_evidence": [], "source_references": [],
+            "explanation": "nothing checkable", "confidence": 0.4,
+            "hallucinated_field": {"nested": True},
+        }],
+        "top_level_invented": [1, 2, 3],
+    })
+    result = parse_verification(raw)
+    assert result.verification is not None
+    entry = result.verification.claims[0]
+    assert entry.verification_status is VerificationStatus.UNVERIFIABLE
+    assert not hasattr(entry, "hallucinated_field")
+
+
+def test_parse_accountability_ignores_unknown_fields():
+    """Invented keys at every level pass through without failing the parse."""
+    from app.agents.structured import parse_accountability
+    from app.schemas import AccountabilityStatus
+
+    raw = json.dumps({
+        "content": "audit",
+        "invented_top": "value",
+        "trace_completeness": True,
+        "final_claim_provenance": [{
+            "claim_id": "c1", "origin": "researcher",
+            "evidence_count": 1, "invented_prov": 7,
+        }],
+        "flags": [{
+            "kind": "retry_activity", "severity": "info",
+            "refs": ["3"], "explanation": "one retry",
+            "invented_flag": True,
+        }],
+        "overall_status": "clean",
+        "summary": "ok",
+        "extra_report_block": {"deep": [1]},
+    })
+    result = parse_accountability(raw)
+    assert result.accountability is not None
+    assert result.accountability.overall_status is AccountabilityStatus.CLEAN
+    assert result.accountability.flags[0].refs == ["3"]

@@ -19,14 +19,16 @@ from app.schemas import AgentRole, MessageType
 from tests.fakes import FakeProvider
 
 
-def test_build_registry_four_agents_canonical_order():
+def test_build_registry_canonical_order():
     registry = build_registry(FakeProvider())
-    assert len(registry) == 4
+    assert len(registry) == 6
     assert registry.roles == [
         AgentRole.MANAGER,
         AgentRole.RESEARCHER,
         AgentRole.IDEATOR,
         AgentRole.SKEPTIC,
+        AgentRole.VERIFIER,
+        AgentRole.ACCOUNTABILITY,
     ]
 
 
@@ -87,7 +89,7 @@ def test_agents_share_injected_provider():
 
 
 def test_default_configs_untouched():
-    assert len(DEFAULT_AGENT_CONFIGS) == 4
+    assert len(DEFAULT_AGENT_CONFIGS) == 6
     assert [c.role for c in DEFAULT_AGENT_CONFIGS] == list(AgentRole)
 
 

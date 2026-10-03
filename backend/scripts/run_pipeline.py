@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Run the full iterative pipeline in one command (Phases 4-6).
+"""Run the full iterative pipeline in one command (Phases 4-6, audits 11).
 
 Usage (from backend/):
   python scripts/run_pipeline.py "Should a two-person startup write down decisions?"
-  python scripts/run_pipeline.py "..." --verbose     # + claims/verdicts/tool calls
+  python scripts/run_pipeline.py "..." --verbose     # + claims/verdicts/tool calls/audits
   python scripts/run_pipeline.py "..." --json        # NDJSON RunEvents
 
 Tools are configured via AI_NEXUS_TOOL_* (see .env.example): file tools need
@@ -29,6 +29,22 @@ from app.orchestrator import Orchestrator  # noqa: E402
 from app.runs import RunEvent, RunEventType, RunManager  # noqa: E402
 from app.tools import build_tool_registry  # noqa: E402
 
+def _verification_counts(report: object) -> dict[str, int]:
+    from collections import Counter
+
+    counts: Counter[str] = Counter()
+    for claim in getattr(report, "claims", []):
+        counts[claim.verification_status.value] += 1
+    counts["total"] = len(getattr(report, "claims", []))
+    return {
+        "total": counts["total"],
+        "verified": counts["verified"],
+        "partially_verified": counts["partially_verified"],
+        "contradicted": counts["contradicted"],
+        "unverifiable": counts["unverifiable"],
+    }
+
+
 def _fmt_step(event: RunEvent) -> str:
     message = event.message
     if event.skipped and message is None:
@@ -45,12 +61,25 @@ def _fmt_step(event: RunEvent) -> str:
             detail = ""
     elif message is None:
         detail = "no output"
+    elif message.verification is not None:
+        counts = _verification_counts(message.verification)
+        detail = (
+            f"{counts['total']} claims — {counts['verified']} verified, "
+            f"{counts['partially_verified']} partial, "
+            f"{counts['contradicted']} contradicted, "
+            f"{counts['unverifiable']} unverifiable"
+        )
+    elif message.accountability is not None:
+        report = message.accountability
+        detail = f"{report.overall_status.value} · {len(report.flags)} flags"
     elif message.verdicts is not None:
         detail = f"{len(message.verdicts)} verdicts"
     elif message.claims is not None:
         detail = f"{len(message.claims)} claims"
     else:
         detail = ""
+    if message is not None and message.retries > 0:
+        detail = f"{detail} ({message.retries} retries)".strip()
     if message is not None and message.tool_results:
         detail = f"tools={len(message.tool_results)} {detail}".strip()
     duration = (
@@ -80,11 +109,73 @@ def _print_details(event: RunEvent) -> None:
         if message.decision.instruction:
             print(f"         instruction: {message.decision.instruction}")
         return
+    if message.verification is not None:
+        for claim in message.verification.claims:
+            print(
+                f"         [{claim.claim_id}] {claim.verification_status.value}"
+                f" — {claim.explanation}"
+            )
+        return
+    if message.accountability is not None:
+        report = message.accountability
+        print(
+            f"         trace complete: {report.trace_completeness}"
+            f" — {report.summary}"
+        )
+        for prov in report.final_claim_provenance:
+            verdict = prov.verdict.value if prov.verdict else "none"
+            print(
+                f"         [{prov.claim_id}] origin={prov.origin.value}"
+                f" verdict={verdict} evidence={prov.evidence_count}"
+            )
+        for flag in report.flags:
+            refs = ",".join(flag.refs)
+            print(
+                f"         {flag.severity.value}: {flag.kind.value}"
+                f" [{refs}] — {flag.explanation}"
+            )
+        return
     origin = message.from_agent.value
     for claim in message.claims or []:
         print(f"         [{claim.id}] ({origin}) {claim.status.value} — {claim.statement}")
     for verdict in message.verdicts or []:
         print(f"         [{verdict.claim_id}] {verdict.verdict.value} — {verdict.objection}")
+
+
+def _print_audit_summary(*, run_record_id: str, runs: RunManager) -> None:
+    """Verbose terminal summary of the two Phase 11 audit reports."""
+    record = runs.get(run_record_id)
+    if record is None:
+        return
+    verification = None
+    accountability = None
+    for step in record.steps:
+        message = step.message
+        if message is None:
+            continue
+        if step.kind.value == "verify" and message.verification is not None:
+            verification = message.verification
+        if step.kind.value == "audit" and message.accountability is not None:
+            accountability = message.accountability
+    if verification is not None:
+        counts = _verification_counts(verification)
+        print()
+        print("-" * 60)
+        print(
+            f"VERIFICATION · {counts['total']} claims · "
+            f"{counts['verified']} verified · "
+            f"{counts['partially_verified']} partial · "
+            f"{counts['contradicted']} contradicted · "
+            f"{counts['unverifiable']} unverifiable"
+        )
+    if accountability is not None:
+        print()
+        print("-" * 60)
+        print(
+            f"ACCOUNTABILITY · {accountability.overall_status.value} · "
+            f"trace complete: {accountability.trace_completeness} · "
+            f"{len(accountability.flags)} flags"
+        )
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -134,6 +225,10 @@ async def run(args: argparse.Namespace) -> int:
                     print("FINAL ANSWER")
                     print("=" * 60)
                     print((final.content if final else "").strip())
+                    if args.verbose:
+                        _print_audit_summary(
+                            run_record_id=run_record.id, runs=runs
+                        )
                 return 0
     finally:
         await provider.aclose()
@@ -143,7 +238,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("task", help="the problem the team works on")
     parser.add_argument("--verbose", action="store_true",
-                        help="print claims/verdicts under each step")
+                        help="print claims/verdicts/audits under each step")
     parser.add_argument("--json", action="store_true",
                         help="emit NDJSON RunEvents (no human output)")
     return asyncio.run(run(parser.parse_args()))

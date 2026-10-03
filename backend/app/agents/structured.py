@@ -16,27 +16,40 @@ from enum import Enum
 from pydantic import BaseModel, Field
 
 from app.schemas import (
+    AccountabilityFlag,
+    AccountabilityFlagKind,
+    AccountabilityReport,
+    AccountabilityStatus,
     AgentRole,
     Claim,
+    ClaimProvenance,
     ClaimStatus,
     ClaimVerdict,
+    ClaimVerification,
     DecisionAction,
     Evidence,
+    FlagSeverity,
     ManagerDecision,
+    VerificationReport,
+    VerificationStatus,
     Verdict,
 )
 
 __all__ = [
+    "ACCOUNTABILITY_SCHEMA",
     "DECISION_SCHEMA",
     "DEFAULT_STRUCTURED_MAX_TOKENS",
     "OutputKind",
     "StructuredResult",
+    "VERIFICATION_SCHEMA",
     "correction_message",
     "directive_for",
     "extract_json",
     "normalize_decision",
+    "parse_accountability",
     "parse_claims",
     "parse_decision",
+    "parse_verification",
     "parse_verdicts",
     "schema_for",
 ]
@@ -51,15 +64,21 @@ class OutputKind(str, Enum):
     CLAIMS = "claims"
     VERDICTS = "verdicts"
     DECISION = "decision"
+    VERIFICATION = "verification"      # Phase 11
+    ACCOUNTABILITY = "accountability"  # Phase 11
 
 
 def _evidence_subschema() -> dict:
+    # minLength is load-bearing: qwen2.5 intermittently emits "" for these
+    # fields, which the domain models reject (string_too_short) and the
+    # grammar cannot express if the constraint is absent. Live-verified that
+    # Ollama's schema->grammar honors nested minLength (Phase 11 §18).
     return {
         "type": "array",
         "items": {
             "type": "object",
             "properties": {
-                "source": {"type": "string"},
+                "source": {"type": "string", "minLength": 1},
                 "quote": {"type": "string"},
             },
             "required": ["source"],
@@ -76,7 +95,7 @@ CLAIMS_SCHEMA: dict = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "statement": {"type": "string"},
+                    "statement": {"type": "string", "minLength": 1},
                     "status": {
                         "type": "string",
                         "enum": [s.value for s in ClaimStatus],
@@ -100,12 +119,12 @@ VERDICTS_SCHEMA: dict = {
             "items": {
                 "type": "object",
                 "properties": {
-                    "claim_id": {"type": "string"},
+                    "claim_id": {"type": "string", "minLength": 1},
                     "verdict": {
                         "type": "string",
                         "enum": [v.value for v in ClaimVerdict],
                     },
-                    "objection": {"type": "string"},
+                    "objection": {"type": "string", "minLength": 1},
                     "evidence": _evidence_subschema(),
                 },
                 "required": ["claim_id", "verdict", "objection", "evidence"],
@@ -122,7 +141,11 @@ _CLAIMS_SENTENCE = (
 _VERDICTS_SENTENCE = (
     'In "verdicts", evaluate every claim under "CLAIMS TO EVALUATE" with exactly '
     "one entry per claim. Use verdict=supported only when the claim's cited "
-    "evidence supports it."
+    "evidence supports it, and a supported verdict must list that evidence in "
+    "the entry — without evidence in the entry, use unverifiable instead of "
+    "supported. Every entry's objection must be a non-empty sentence; for "
+    "supported claims state what the evidence shows, for "
+    "unverifiable claims name the missing evidence."
 )
 
 DECISION_SCHEMA: dict = {
@@ -130,8 +153,9 @@ DECISION_SCHEMA: dict = {
     "properties": {
         "action": {"type": "string", "enum": [a.value for a in DecisionAction]},
         "target": {"type": "string", "enum": ["researcher", "ideator"]},
+        # instruction stays unbounded: FINISH decisions legitimately carry ""
         "instruction": {"type": "string"},
-        "reason": {"type": "string"},
+        "reason": {"type": "string", "minLength": 1},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
     },
     "required": ["action", "reason", "confidence"],
@@ -150,6 +174,118 @@ Use action="finish" when no unresolved claims remain, when no remaining work ste
 If the remaining unresolved claims cannot be resolved with the available tools (for example, prior tool calls returned provider or network errors and no files cover them), do not repeat a failing search: use action="finish" so the synthesis can answer with clearly labeled uncertainty.
 """
 
+# ------------------------------------------------------------ Phase 11
+
+VERIFICATION_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "content": {"type": "string"},
+        "claims": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim_id": {"type": "string", "minLength": 1},
+                    "verification_status": {
+                        "type": "string",
+                        "enum": [s.value for s in VerificationStatus],
+                    },
+                    "evidence_checked": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                    "supporting_evidence": _evidence_subschema(),
+                    "contradicting_evidence": _evidence_subschema(),
+                    "source_references": {
+                        "type": "array",
+                        "items": {"type": "string", "minLength": 1},
+                    },
+                    "explanation": {"type": "string", "minLength": 1},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": [
+                    "claim_id", "verification_status", "evidence_checked",
+                    "supporting_evidence", "contradicting_evidence",
+                    "source_references", "explanation", "confidence",
+                ],
+            },
+        },
+    },
+    "required": ["content", "claims"],
+}
+
+_VERIFICATION_SENTENCE = (
+    'In "claims", evaluate every claim under "CLAIMS TO EVALUATE" with exactly '
+    "one entry per claim id. Verify against evidence you check yourself; a prior "
+    "verdict is context, never proof. Use verified only with your own supporting "
+    "evidence and source references, contradicted only with contradicting "
+    "evidence, partially_verified when support is incomplete, unverifiable when "
+    "nothing authoritative can be checked."
+)
+
+ACCOUNTABILITY_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "content": {"type": "string"},
+        "trace_completeness": {"type": "boolean"},
+        "final_claim_provenance": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "claim_id": {"type": "string", "minLength": 1},
+                    "origin": {
+                        "type": "string",
+                        "enum": ["manager", "researcher", "ideator", "skeptic"],
+                    },
+                    "verdict": {
+                        "type": "string",
+                        "enum": [v.value for v in ClaimVerdict],
+                    },
+                    "evidence_count": {"type": "integer"},
+                },
+                "required": ["claim_id", "origin", "evidence_count"],
+            },
+        },
+        "flags": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "kind": {
+                        "type": "string",
+                        "enum": [k.value for k in AccountabilityFlagKind],
+                    },
+                    "severity": {
+                        "type": "string",
+                        "enum": [s.value for s in FlagSeverity],
+                    },
+                    "refs": {"type": "array", "items": {"type": "string"}},
+                    "explanation": {"type": "string", "minLength": 1},
+                },
+                "required": ["kind", "severity", "refs", "explanation"],
+            },
+        },
+        "overall_status": {
+            "type": "string",
+            "enum": [s.value for s in AccountabilityStatus],
+        },
+        "summary": {"type": "string", "minLength": 1},
+    },
+    "required": [
+        "content", "trace_completeness", "final_claim_provenance",
+        "flags", "overall_status", "summary",
+    ],
+}
+
+_ACCOUNTABILITY_SENTENCE = (
+    'Audit the trace. "final_claim_provenance" must echo the provided facts '
+    'exactly. Every FACT entry listed in the context must appear in "flags" with '
+    'the same kind/severity/refs. "overall_status" is violations if any flag is '
+    "a violation, warnings if any is a warning, else clean. Do not re-research "
+    "claims and do not judge answer quality."
+)
+
 
 def schema_for(kind: OutputKind) -> dict | None:
     if kind is OutputKind.CLAIMS:
@@ -158,7 +294,19 @@ def schema_for(kind: OutputKind) -> dict | None:
         return VERDICTS_SCHEMA
     if kind is OutputKind.DECISION:
         return DECISION_SCHEMA
+    if kind is OutputKind.VERIFICATION:
+        return VERIFICATION_SCHEMA
+    if kind is OutputKind.ACCOUNTABILITY:
+        return ACCOUNTABILITY_SCHEMA
     return None
+
+
+_SENTENCES: dict[OutputKind, str] = {
+    OutputKind.CLAIMS: _CLAIMS_SENTENCE,
+    OutputKind.VERDICTS: _VERDICTS_SENTENCE,
+    OutputKind.VERIFICATION: _VERIFICATION_SENTENCE,
+    OutputKind.ACCOUNTABILITY: _ACCOUNTABILITY_SENTENCE,
+}
 
 
 def directive_for(kind: OutputKind) -> str:
@@ -168,15 +316,64 @@ def directive_for(kind: OutputKind) -> str:
     if kind is OutputKind.DECISION:
         body = _DECISION_BODY
     else:
-        sentence = _CLAIMS_SENTENCE if kind is OutputKind.CLAIMS else _VERDICTS_SENTENCE
+        sentence = _SENTENCES[kind]
         body = f'The "content" field holds your full prose answer.\n{sentence}'
     return (
         f"{_DIRECTIVE_HEADER}{json.dumps(schema, separators=(',', ':'))}\n\n{body}"
     )
 
 
+# Known violations paired with the concrete fix, so the one allowed retry is
+# actionable instead of a bare restatement. Live-verified: a temp-0 manager
+# that re-emitted `status=fact` with no evidence twice in a row complied
+# (fact -> assumption) as soon as the correction named the fix (Phase 11 §18).
+_FIX_HINTS: tuple[tuple[str, str], ...] = (
+    (
+        "status=fact but no evidence",
+        "add an evidence entry with a source, or use "
+        "status=unverified/assumption/hypothesis instead of fact",
+    ),
+    (
+        "marked supported without evidence",
+        "list the supporting evidence in that verdict entry, or use "
+        "verdict=unverifiable instead of supported",
+    ),
+    ("has no objection", "write a non-empty objection sentence for that verdict"),
+    (
+        "was not evaluated",
+        "add exactly one verdict entry for every claim id under CLAIMS TO EVALUATE",
+    ),
+    (
+        "verified without recording checked evidence",
+        "list every source you actually checked in evidence_checked",
+    ),
+    (
+        "verified without supporting evidence",
+        "add your supporting evidence, or use unverifiable",
+    ),
+    (
+        "verified without source references",
+        "include the source references you actually used",
+    ),
+    (
+        "partially verified without evidence",
+        "list your supporting evidence, or use unverifiable if you checked nothing",
+    ),
+    (
+        "contradicted without contradicting evidence",
+        "add the contradicting evidence, or use unverifiable",
+    ),
+)
+
+
 def correction_message(problems: list[str]) -> str:
-    joined = "; ".join(problems)
+    annotated = []
+    for problem in problems:
+        fix = next(
+            (hint for needle, hint in _FIX_HINTS if needle in problem), None
+        )
+        annotated.append(f"{problem} -> fix: {fix}" if fix else problem)
+    joined = "; ".join(annotated)
     return (
         f"Your previous response was rejected: {joined}.\n"
         "Respond again with ONLY a single valid JSON object matching the required "
@@ -256,12 +453,53 @@ class _DecisionDTO(BaseModel):
     confidence: float
 
 
+class _VerificationDTO(BaseModel):
+    claim_id: str
+    verification_status: VerificationStatus
+    evidence_checked: list[str] = Field(default_factory=list)
+    supporting_evidence: list[_EvidenceDTO] = Field(default_factory=list)
+    contradicting_evidence: list[_EvidenceDTO] = Field(default_factory=list)
+    source_references: list[str] = Field(default_factory=list)
+    explanation: str
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class _VerificationOutput(BaseModel):
+    content: str
+    claims: list[_VerificationDTO]
+
+
+class _ProvenanceDTO(BaseModel):
+    claim_id: str
+    origin: AgentRole
+    verdict: ClaimVerdict | None = None
+    evidence_count: int = Field(default=0, ge=0)
+
+
+class _FlagDTO(BaseModel):
+    kind: AccountabilityFlagKind
+    severity: FlagSeverity
+    refs: list[str] = Field(default_factory=list)
+    explanation: str
+
+
+class _AccountabilityOutput(BaseModel):
+    content: str
+    trace_completeness: bool
+    final_claim_provenance: list[_ProvenanceDTO] = Field(default_factory=list)
+    flags: list[_FlagDTO] = Field(default_factory=list)
+    overall_status: AccountabilityStatus
+    summary: str
+
+
 @dataclass(frozen=True, slots=True)
 class StructuredResult:
     content: str
     claims: list[Claim] | None
     verdicts: list[Verdict] | None
     decision: ManagerDecision | None = None
+    verification: VerificationReport | None = None
+    accountability: AccountabilityReport | None = None
 
 
 def _domain_evidence(items: list[_EvidenceDTO]) -> list[Evidence]:
@@ -325,3 +563,69 @@ def normalize_decision(decision: ManagerDecision) -> ManagerDecision:
     ):
         return decision.model_copy(update={"target": None, "instruction": ""})
     return decision
+
+
+def parse_verification(raw: str) -> StructuredResult:
+    """Extract -> DTO (extras ignored) -> `VerificationReport`.
+
+    Claim ids pass through untouched; coverage and status rules are enforced
+    by `app.audits.validate_verification` (retry-once correction path).
+    """
+    data = json.loads(extract_json(raw))
+    out = _VerificationOutput.model_validate(data)
+    report = VerificationReport(
+        claims=[
+            ClaimVerification(
+                claim_id=item.claim_id,
+                verification_status=item.verification_status,
+                evidence_checked=item.evidence_checked,
+                supporting_evidence=_domain_evidence(item.supporting_evidence),
+                contradicting_evidence=_domain_evidence(
+                    item.contradicting_evidence
+                ),
+                source_references=item.source_references,
+                explanation=item.explanation,
+                confidence=item.confidence,
+            )
+            for item in out.claims
+        ]
+    )
+    return StructuredResult(
+        content=out.content, claims=None, verdicts=None, verification=report
+    )
+
+
+def parse_accountability(raw: str) -> StructuredResult:
+    """Extract -> DTO -> `AccountabilityReport` (pydantic validators run).
+
+    Mechanical completeness is NOT trusted to the model: the orchestrator
+    merges code-computed facts via `enforce_accountability` before persisting.
+    """
+    data = json.loads(extract_json(raw))
+    out = _AccountabilityOutput.model_validate(data)
+    report = AccountabilityReport(
+        trace_completeness=out.trace_completeness,
+        final_claim_provenance=[
+            ClaimProvenance(
+                claim_id=item.claim_id,
+                origin=item.origin,
+                verdict=item.verdict,
+                evidence_count=item.evidence_count,
+            )
+            for item in out.final_claim_provenance
+        ],
+        flags=[
+            AccountabilityFlag(
+                kind=item.kind,
+                severity=item.severity,
+                refs=item.refs,
+                explanation=item.explanation,
+            )
+            for item in out.flags
+        ],
+        overall_status=out.overall_status,
+        summary=out.summary,
+    )
+    return StructuredResult(
+        content=out.content, claims=None, verdicts=None, accountability=report
+    )

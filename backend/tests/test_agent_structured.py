@@ -275,6 +275,72 @@ async def test_structured_empty_output_raises_empty_error():
         await _run(_claims_config(), provider, task="t")
 
 
+async def test_verification_report_only_message_is_output():
+    """Empty prose + a report object counts as structured output (Phase 11
+    §6.7 empty rule) — the zero-claim verifier case."""
+    report_only = json.dumps({"content": "", "claims": []})
+    provider = FakeProvider()
+    provider.queue_result(FakeProvider.make_result(report_only))
+    config = AgentConfig(
+        role=AgentRole.VERIFIER, display_name="Verifier",
+        instructions="Verify claims independently.",
+        temperature=0.0, output_type=MessageType.VERIFICATION,
+        output_kind=OutputKind.VERIFICATION,
+    )
+    message = await _run(config, provider, task="t")
+
+    assert message.content == ""
+    assert message.verification is not None
+    assert message.verification.claims == []
+    assert message.claims is None and message.verdicts is None
+    assert message.retries == 0
+
+
+async def test_accountability_report_only_message_is_output():
+    """Empty prose + an accountability report is output, not an empty error."""
+    report_only = json.dumps({
+        "content": "",
+        "trace_completeness": True,
+        "final_claim_provenance": [],
+        "flags": [],
+        "overall_status": "clean",
+        "summary": "clean",
+    })
+    provider = FakeProvider()
+    provider.queue_result(FakeProvider.make_result(report_only))
+    config = AgentConfig(
+        role=AgentRole.ACCOUNTABILITY, display_name="Accountability",
+        instructions="Audit the trace only.",
+        temperature=0.0, output_type=MessageType.ACCOUNTABILITY,
+        output_kind=OutputKind.ACCOUNTABILITY,
+    )
+    message = await _run(config, provider, task="t")
+
+    assert message.content == ""
+    assert message.accountability is not None
+    assert message.accountability.overall_status.value == "clean"
+    assert message.verification is None
+
+
+async def test_verification_kind_still_rejects_garbage_twice():
+    """Report kinds keep the shared retry-once contract: garbage twice is a
+    StructuredOutputError, never a silent empty message."""
+    from app.agents.errors import EmptyAgentResponseError  # noqa: F401
+
+    provider = FakeProvider()
+    provider.queue_result(FakeProvider.make_result("not json at all"))
+    provider.queue_result(FakeProvider.make_result("still not json"))
+    config = AgentConfig(
+        role=AgentRole.VERIFIER, display_name="Verifier",
+        instructions="Verify claims independently.",
+        temperature=0.0, output_type=MessageType.VERIFICATION,
+        output_kind=OutputKind.VERIFICATION,
+    )
+    with pytest.raises(StructuredOutputError):
+        await _run(config, provider, task="t")
+    assert len(provider.chat_calls) == 2
+
+
 async def test_llm_error_propagates_without_retry(caplog):
     provider = FakeProvider()
     provider.queue_result(ProviderUnavailableError())

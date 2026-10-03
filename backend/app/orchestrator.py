@@ -23,6 +23,7 @@ from typing import Any
 
 from app.agents import AgentRegistry
 from app.agents.structured import OutputKind, normalize_decision
+from app.audits import AuditFacts, compute_audit_facts, enforce_accountability
 from app.runs import (
     ErrorInfo,
     RoundSnapshot,
@@ -42,6 +43,7 @@ from app.schemas import (
     DecisionAction,
     ManagerDecision,
     MessageType,
+    VerificationStatus,
     Verdict,
 )
 
@@ -58,6 +60,8 @@ __all__ = [
     "render_decision_summary",
     "render_evidence_board",
     "render_iteration_history",
+    "render_accountability_context",
+    "render_verification_context",
     "render_revision_context",
     "render_synthesis_context",
     "resolve_claim",
@@ -69,7 +73,8 @@ ROUND_ONE_STEPS: tuple[tuple[StepKind, AgentRole], ...] = (
     (StepKind.IDEATE, AgentRole.IDEATOR),
 )
 
-MAX_TOTAL_STEPS = 16          # bug insurance above the MAX_ROUNDS bound
+MAX_TOTAL_STEPS = 20          # Phase 11: audit headroom above MAX_ROUNDS;
+                              # the loop-top guard still bounds iteration only
 MAX_SUMMARY_ENTRIES = 10      # decision-context entry cap (PRD §6.7)
 CLIP_CHARS = 200              # per-field clipping in the decision context
 
@@ -436,6 +441,177 @@ def select_best_round(snapshots: Sequence[RoundSnapshot]) -> RoundSnapshot:
     )
 
 
+# ------------------------------------------------- Phase 11 audit renderers
+
+
+_VERIFICATION_VERDICTS_HEADER = (
+    "PRIOR VERDICTS (context only — never grounds for verification):"
+)
+
+
+def render_verification_context(
+    final_content: str,
+    claims: Sequence[Claim],
+    verdicts: Sequence[Verdict],
+) -> str:
+    """Verifier input (Phase 11 PRD §6.6).
+
+    The final answer under audit plus prior verdicts — strictly as context.
+    Claims themselves arrive through the canonical `CLAIMS TO EVALUATE`
+    block (`render_claims`), so evidence rendering is not duplicated.
+    """
+    header = f"FINAL ANSWER:\n{final_content or '(empty)'}"
+    if not claims:
+        return f"{header}\n\n{_VERIFICATION_VERDICTS_HEADER} (none)"
+    verdict_by_id = {verdict.claim_id: verdict for verdict in verdicts}
+    lines = []
+    for claim in claims:
+        verdict = verdict_by_id.get(claim.id)
+        if verdict is None:
+            lines.append(f"[{claim.id}] none")
+        else:
+            lines.append(
+                f"[{claim.id}] {verdict.verdict.value} — {verdict.objection}"
+            )
+    return f"{header}\n\n{_VERIFICATION_VERDICTS_HEADER}\n" + "\n".join(lines)
+
+
+_UNRESOLVED_CAP = 10
+
+
+def render_accountability_context(
+    run: RunRecord,
+    facts: AuditFacts,
+    verification: Any,
+) -> str:
+    """Accountability input (Phase 11 PRD §6.6): deterministic trace facts,
+    code-computed provenance, the verification summary, the final answer, and
+    the FACT ENTRIES the report must echo in its flags."""
+    steps_line = " ".join(
+        f"{step.kind.value}={step.status.value}" for step in run.steps
+    )
+
+    decision_parts: list[str] = []
+    guard_parts: list[str] = []
+    failed_steps: list[str] = []
+    retry_steps: list[str] = []
+    retries_total = 0
+    for step in run.steps:
+        if step.status is StepStatus.FAILED:
+            failed_steps.append(str(step.index))
+        if step.message is not None and step.message.retries > 0:
+            retries_total += step.message.retries
+            retry_steps.append(str(step.index))
+        if step.kind is not StepKind.DECIDE or step.message is None:
+            continue
+        decision = step.message.decision
+        if decision is None:
+            continue
+        rnd = f"r{step.round}" if step.round is not None else "r?"
+        if step.skipped:
+            decision_parts.append(f"{rnd} guard_finish({decision.reason})")
+            guard_parts.append(f"round {step.round} {decision.reason}")
+        else:
+            target = f"→{decision.target.value}" if decision.target else ""
+            decision_parts.append(
+                f"{rnd} {decision.action.value}{target} "
+                f"confidence={decision.confidence:.2f}"
+            )
+
+    selected = select_best_round(run.rounds) if run.rounds else None
+    if selected is None:
+        selected_line = "selected_round: none"
+        final_claims_line = "final_claims: 0"
+        provenance_lines = ["(none)"]
+        unresolved_lines = ["(none)"]
+    else:
+        selected_line = (
+            f"selected_round: {selected.round_number} "
+            f"supported={selected.supported_count} "
+            f"unresolved={selected.unresolved_count}"
+        )
+        final_claims_line = f"final_claims: {len(selected.claims)}"
+        provenance_lines = [
+            f"[{p.claim_id}] origin={p.origin.value} "
+            f"verdict={p.verdict.value if p.verdict is not None else 'none'} "
+            f"evidence={p.evidence_count}"
+            for p in facts.provenance
+        ] or ["(none)"]
+        verdict_by_id = {v.claim_id: v for v in selected.verdicts}
+        unresolved: list[str] = []
+        for claim in selected.claims:
+            verdict = verdict_by_id.get(claim.id)
+            if verdict is not None and verdict.verdict is ClaimVerdict.SUPPORTED:
+                continue
+            origin = selected.origins.get(claim.id)
+            label = verdict.verdict.value if verdict is not None else "none"
+            objection = verdict.objection if verdict is not None else "no verdict recorded"
+            unresolved.append(
+                f"[{claim.id}] ({origin.value if origin else '?'}) "
+                f"verdict={label} — {objection}"
+            )
+        if not unresolved:
+            unresolved_lines = ["(none)"]
+        elif len(unresolved) <= _UNRESOLVED_CAP:
+            unresolved_lines = unresolved
+        else:
+            unresolved_lines = [
+                *unresolved[:_UNRESOLVED_CAP],
+                f"... and {len(unresolved) - _UNRESOLVED_CAP} more unresolved claims",
+            ]
+
+    counts = {status: 0 for status in VerificationStatus}
+    if verification is not None:
+        for entry in verification.claims:
+            counts[entry.verification_status] += 1
+    verification_line = (
+        f"verified={counts[VerificationStatus.VERIFIED]} "
+        f"partially_verified={counts[VerificationStatus.PARTIALLY_VERIFIED]} "
+        f"contradicted={counts[VerificationStatus.CONTRADICTED]} "
+        f"unverifiable={counts[VerificationStatus.UNVERIFIABLE]}"
+    )
+
+    final_answer = ""
+    for step in run.steps:
+        if step.kind is StepKind.SYNTHESIZE and step.message is not None:
+            final_answer = step.message.content
+            break
+
+    fact_lines = [
+        (
+            f"- kind={fact.kind.value} severity={fact.severity.value} "
+            f"refs=[{','.join(fact.refs)}] detail={fact.detail}"
+        )
+        for fact in facts.required_flags
+    ] or ["(none)"]
+
+    return "\n".join([
+        "RUN TRACE FACTS:",
+        f"steps: {steps_line or '(none)'}",
+        f"decisions: {' | '.join(decision_parts) or 'none'}",
+        f"guards: {'; '.join(guard_parts) or 'none'}",
+        f"failed_steps: {','.join(failed_steps) or 'none'}",
+        f"retries: total={retries_total} steps=[{','.join(retry_steps)}]",
+        selected_line,
+        final_claims_line,
+        "",
+        "FINAL CLAIM PROVENANCE:",
+        *provenance_lines,
+        "",
+        "UNRESOLVED AT SYNTHESIS:",
+        *unresolved_lines,
+        "",
+        "VERIFICATION SUMMARY:",
+        verification_line,
+        "",
+        "FINAL ANSWER:",
+        final_answer,
+        "",
+        "FACT ENTRIES (every entry MUST appear in your flags with the same kind/severity/refs):",
+        *fact_lines,
+    ])
+
+
 # ---------------------------------------------------------------- orchestrator
 
 
@@ -677,6 +853,40 @@ class Orchestrator:
                 round_=None,
             )
 
+            # ---- Phase 11: independent verification of the final answer ----
+            verifier = self._registry.get(AgentRole.VERIFIER)
+            verify_context = render_verification_context(
+                final.content, best.claims, best.verdicts
+            )
+            verification_msg = await self._step(
+                run, StepKind.VERIFY, AgentRole.VERIFIER,
+                lambda: verifier.run(
+                    task_text, context=verify_context, claims=list(best.claims),
+                    message_type=MessageType.VERIFICATION, run_id=run_id,
+                ),
+                round_=None,
+            )
+
+            # ---- Phase 11: process audit over the completed trace -----------
+            # Facts are computed BEFORE the audit step exists (its own step
+            # record is not part of the trace being audited).
+            facts = compute_audit_facts(run.rounds, run.steps, final.content)
+            audit_context = render_accountability_context(
+                run, facts, verification_msg.verification
+            )
+            accountability = self._registry.get(AgentRole.ACCOUNTABILITY)
+            await self._step(
+                run, StepKind.AUDIT, AgentRole.ACCOUNTABILITY,
+                lambda: accountability.run(
+                    task_text, context=audit_context,
+                    message_type=MessageType.ACCOUNTABILITY, run_id=run_id,
+                ),
+                round_=None,
+                transform=lambda message: self._enforce_audit(
+                    run, message, facts
+                ),
+            )
+
             run.final_message = final
             run.status = RunStatus.COMPLETED
             run.finished_at = datetime.now(UTC)
@@ -736,6 +946,7 @@ class Orchestrator:
         call: Callable[[], Coroutine[Any, Any, AgentMessage]],
         *,
         round_: int | None,
+        transform: Callable[[AgentMessage], AgentMessage] | None = None,
     ) -> AgentMessage:
         index = len(run.steps) + 1
         record = StepRecord(
@@ -754,6 +965,11 @@ class Orchestrator:
         started = time.monotonic()
         try:
             message = await call()
+            # Applied BEFORE persistence/publication so the stored message,
+            # the step record, and the SSE event are always identical
+            # (Phase 11 enforcement transform).
+            if transform is not None:
+                message = transform(message)
         except Exception as exc:
             record.status = StepStatus.FAILED
             record.duration_ms = round((time.monotonic() - started) * 1000, 1)
@@ -768,6 +984,29 @@ class Orchestrator:
             message=message,
         )
         return message
+
+    def _enforce_audit(
+        self, run: RunRecord, message: AgentMessage, facts: AuditFacts
+    ) -> AgentMessage:
+        """Merge code-canonical facts into the audit report (PRD §6.5.4).
+
+        Runs as the AUDIT step's transform, so the enforced report is what the
+        step record, the STEP_COMPLETED event, and persistence all receive.
+        A missing report is a programming error and fails the step loudly.
+        """
+        report = message.accountability
+        if report is None:
+            raise ValueError("accountability step returned no report")
+        enforced = enforce_accountability(report, facts)
+        if enforced != report:
+            logger.info(
+                "audit_enforced run=%s added_flags=%d trace=%s status=%s",
+                run.id,
+                len(enforced.flags) - len(report.flags),
+                enforced.trace_completeness,
+                enforced.overall_status.value,
+            )
+        return message.model_copy(update={"accountability": enforced})
 
     def _mark_skipped(
         self, run: RunRecord, kind: StepKind, agent: AgentRole, *,

@@ -52,7 +52,8 @@ async def test_live_run_survives_restart(tmp_path):
     assert run.status is RunStatus.COMPLETED
     step_kinds = [step.kind.value for step in run.steps]
     assert step_kinds[0] == "plan"
-    assert step_kinds[-1] == "synthesize"
+    # Phase 11: completed runs always end synthesize -> verify -> audit
+    assert step_kinds[-3:] == ["synthesize", "verify", "audit"]
     assert run.final_message is not None
     assert run.final_message.content.strip()
     assert run.rounds, "round 1 snapshot must be recorded"

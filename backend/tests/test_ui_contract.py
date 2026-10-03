@@ -35,17 +35,19 @@ EVENT_KEYS = {
     "task", "message", "duration_ms", "skipped", "error",
 }
 
-# frontend/src/types.ts — AgentMessage
+# frontend/src/types.ts — AgentMessage (Phase 11 §6.10 adds the audit fields)
 MESSAGE_KEYS = {
     "id", "from_agent", "to_agent", "type", "content", "claims", "verdicts",
-    "decision", "confidence", "tool_calls", "tool_results", "round",
-    "created_at",
+    "decision", "verification", "accountability", "confidence", "tool_calls",
+    "tool_results", "retries", "round", "created_at",
 }
 
 # frontend/src/types.ts — RunPayload / StepPayload / RunSummary
 RUN_PAYLOAD_KEYS = {
     "run_id", "task", "status", "created_at", "started_at", "finished_at",
     "duration_ms", "steps", "rounds", "selected_round", "final_message", "error",
+    # Phase 11 §6.10: top-level audit messages (null when absent)
+    "verification", "accountability",
 }
 STEP_PAYLOAD_KEYS = {
     "index", "kind", "agent", "status", "round", "duration_ms", "skipped",

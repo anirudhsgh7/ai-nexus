@@ -1,9 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ACCOUNTABILITY_STATUS_LABELS,
+  ACCOUNTABILITY_STATUS_TONES,
+  AGENT_LABELS,
   CLAIM_STATUS_LABELS,
   CLAIM_STATUS_TONES,
+  FLAG_SEVERITY_LABELS,
+  FLAG_SEVERITY_TONES,
   VERDICT_LABELS,
+  VERIFICATION_STATUS_LABELS,
+  VERIFICATION_STATUS_TONES,
   agentLabel,
   formatConfidence,
   formatDuration,
@@ -100,5 +107,51 @@ describe("formatConfidence", () => {
     expect(formatConfidence(1.01)).toBe("—");
     expect(formatConfidence(-0.01)).toBe("—");
     expect(formatConfidence(Number.NaN)).toBe("—");
+  });
+});
+
+
+// --------------------------------------------- Phase 11 audit display labels
+
+describe("audit display labels", () => {
+  it("labels all four verification statuses with paired tones", () => {
+    expect(Object.keys(VERIFICATION_STATUS_LABELS)).toHaveLength(4);
+    for (const status of Object.keys(VERIFICATION_STATUS_LABELS) as Array<
+      keyof typeof VERIFICATION_STATUS_LABELS
+    >) {
+      expect(VERIFICATION_STATUS_LABELS[status]).not.toBe("");
+      expect(VERIFICATION_STATUS_TONES[status]).toMatch(/^vf-/);
+    }
+    expect(VERIFICATION_STATUS_LABELS.partially_verified).toBe(
+      "Partially verified",
+    );
+  });
+
+  it("labels flag severities with paired tones", () => {
+    expect(FLAG_SEVERITY_LABELS).toEqual({
+      info: "info",
+      warning: "warning",
+      violation: "violation",
+    });
+    for (const severity of ["info", "warning", "violation"] as const) {
+      expect(FLAG_SEVERITY_TONES[severity]).toMatch(/^flag-/);
+    }
+  });
+
+  it("labels accountability statuses with paired tones", () => {
+    expect(ACCOUNTABILITY_STATUS_LABELS).toEqual({
+      clean: "Clean",
+      warnings: "Warnings",
+      violations: "Violations",
+    });
+    for (const status of ["clean", "warnings", "violations"] as const) {
+      expect(ACCOUNTABILITY_STATUS_TONES[status]).not.toBe("");
+    }
+  });
+
+  it("labels all six agent roles", () => {
+    expect(Object.keys(AGENT_LABELS)).toHaveLength(6);
+    expect(agentLabel("verifier")).toBe("Verifier");
+    expect(agentLabel("accountability")).toBe("Accountability");
   });
 });

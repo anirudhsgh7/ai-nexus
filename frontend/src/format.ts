@@ -1,12 +1,20 @@
-/** Pure display helpers (Phase 8 PRD §6.6/§6.7, Phase 9 PRD §6.8). No I/O. */
+/** Pure display helpers (Phase 8 PRD §6.6/§6.7, Phase 9 §6.8, Phase 11 §6.11). No I/O. */
 
-import type { AgentRole, Claim, Verdict } from "./types";
+import type {
+  AgentRole,
+  Claim,
+  FlagSeverity,
+  Verdict,
+  VerificationStatus,
+} from "./types";
 
 export const AGENT_LABELS: Record<AgentRole, string> = {
   manager: "Manager",
   researcher: "Researcher",
   ideator: "Ideator",
   skeptic: "Skeptic",
+  verifier: "Verifier",
+  accountability: "Accountability",
 };
 
 export function agentLabel(role: AgentRole): string {
@@ -86,3 +94,50 @@ export function formatConfidence(value: number | null): string {
 export function verdictLabel(verdict: Verdict["verdict"] | null): string {
   return verdict === null ? "Not evaluated" : VERDICT_LABELS[verdict];
 }
+
+// ---------------------------------------------- Phase 11: audit display
+
+export const VERIFICATION_STATUS_LABELS: Record<VerificationStatus, string> = {
+  verified: "Verified",
+  contradicted: "Contradicted",
+  unverifiable: "Unverifiable",
+  partially_verified: "Partially verified",
+};
+
+/** CSS class suffixes; always paired with the text label (a11y). */
+export const VERIFICATION_STATUS_TONES: Record<VerificationStatus, string> = {
+  verified: "vf-verified",
+  contradicted: "vf-contradicted",
+  unverifiable: "vf-unverifiable",
+  partially_verified: "vf-partial",
+};
+
+export const FLAG_SEVERITY_LABELS: Record<FlagSeverity, string> = {
+  info: "info",
+  warning: "warning",
+  violation: "violation",
+};
+
+export const FLAG_SEVERITY_TONES: Record<FlagSeverity, string> = {
+  info: "flag-info",
+  warning: "flag-warning",
+  violation: "flag-violation",
+};
+
+export const ACCOUNTABILITY_STATUS_LABELS: Record<
+  "clean" | "warnings" | "violations",
+  string
+> = {
+  clean: "Clean",
+  warnings: "Warnings",
+  violations: "Violations",
+};
+
+export const ACCOUNTABILITY_STATUS_TONES: Record<
+  "clean" | "warnings" | "violations",
+  string
+> = {
+  clean: "verdict-supported",
+  warnings: "verdict-unverifiable",
+  violations: "verdict-refuted",
+};

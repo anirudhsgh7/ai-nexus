@@ -7,7 +7,13 @@
  * reason these types may be hand-written.
  */
 
-export type AgentRole = "manager" | "researcher" | "ideator" | "skeptic";
+export type AgentRole =
+  | "manager"
+  | "researcher"
+  | "ideator"
+  | "skeptic"
+  | "verifier"
+  | "accountability";
 
 export type StepKind =
   | "plan"
@@ -16,7 +22,9 @@ export type StepKind =
   | "critique"
   | "decide"
   | "revise"
-  | "synthesize";
+  | "synthesize"
+  | "verify"
+  | "audit";
 
 export type RunStatus = "running" | "completed" | "failed";
 
@@ -68,6 +76,67 @@ export interface ManagerDecision {
   confidence: number;
 }
 
+// ------------------------------------------------- Phase 11 audit reports
+
+export type VerificationStatus =
+  | "verified"
+  | "contradicted"
+  | "unverifiable"
+  | "partially_verified";
+
+export interface ClaimVerification {
+  claim_id: string;
+  verification_status: VerificationStatus;
+  evidence_checked: string[];
+  supporting_evidence: Evidence[];
+  contradicting_evidence: Evidence[];
+  source_references: string[];
+  explanation: string;
+  confidence: number;
+}
+
+export interface VerificationReport {
+  claims: ClaimVerification[];
+}
+
+export type AccountabilityFlagKind =
+  | "trace_incompleteness"
+  | "unsupported_final_claim"
+  | "unresolved_claim_suppressed"
+  | "decision_inconsistency"
+  | "evidence_provenance_gap"
+  | "tool_use_inconsistency"
+  | "peer_prose_exposure"
+  | "premature_stop"
+  | "confidence_evidence_mismatch"
+  | "retry_activity";
+
+export type FlagSeverity = "info" | "warning" | "violation";
+
+export interface AccountabilityFlag {
+  kind: AccountabilityFlagKind;
+  severity: FlagSeverity;
+  refs: string[];
+  explanation: string;
+}
+
+export type AccountabilityStatus = "clean" | "warnings" | "violations";
+
+export interface ClaimProvenance {
+  claim_id: string;
+  origin: AgentRole;
+  verdict: Verdict["verdict"] | null;
+  evidence_count: number;
+}
+
+export interface AccountabilityReport {
+  trace_completeness: boolean;
+  final_claim_provenance: ClaimProvenance[];
+  flags: AccountabilityFlag[];
+  overall_status: AccountabilityStatus;
+  summary: string;
+}
+
 export interface ToolCall {
   name: string;
   arguments: Record<string, unknown>;
@@ -96,9 +165,12 @@ export interface AgentMessage {
   claims: Claim[] | null;
   verdicts: Verdict[] | null;
   decision: ManagerDecision | null;
+  verification: VerificationReport | null;
+  accountability: AccountabilityReport | null;
   confidence: number | null;
   tool_calls: ToolCall[] | null;
   tool_results: ToolResult[] | null;
+  retries: number;
   round: number | null;
   created_at: string;
 }
@@ -160,6 +232,8 @@ export interface RunPayload {
   steps: StepPayload[];
   rounds: RoundSummary[];
   selected_round: number | null;
+  verification: AgentMessage | null;
+  accountability: AgentMessage | null;
   final_message: AgentMessage | null;
   error: ErrorInfo | null;
 }

@@ -108,6 +108,77 @@ def _by_name(checks, name: str):
     return next(check for check in checks if check.name == name)
 
 
+def _attach_audits(
+    run,
+    *,
+    overall: object = None,
+    drop_from_verification: str | None = None,
+) -> None:
+    """Append scripted VERIFY/AUDIT steps whose reports cover the selected round.
+
+    Mirrors what the real pipeline persists: verification covers every final
+    claim exactly once; accountability provenance echoes the selected round.
+    """
+    from app.orchestrator import select_best_round
+    from app.schemas import (
+        AccountabilityReport,
+        AccountabilityStatus,
+        ClaimProvenance,
+        ClaimVerification,
+        VerificationReport,
+        VerificationStatus,
+    )
+
+    selected = select_best_round(run.rounds) if run.rounds else None
+    verdict_by_id = {v.claim_id: v for v in selected.verdicts} if selected else {}
+    entries = []
+    provenance = []
+    if selected is not None:
+        for claim in selected.claims:
+            if drop_from_verification is not None and claim.id == drop_from_verification:
+                continue
+            entries.append(ClaimVerification(
+                claim_id=claim.id,
+                verification_status=VerificationStatus.UNVERIFIABLE,
+                explanation="no authoritative source in this context",
+                confidence=0.4,
+            ))
+            verdict = verdict_by_id.get(claim.id)
+            provenance.append(ClaimProvenance(
+                claim_id=claim.id,
+                origin=selected.origins[claim.id],
+                verdict=verdict.verdict if verdict is not None else None,
+                evidence_count=len(claim.evidence),
+            ))
+    now = datetime.now(UTC)
+    run.steps.append(StepRecord(
+        index=len(run.steps) + 1, kind=StepKind.VERIFY,
+        agent=AgentRole.VERIFIER, status=StepStatus.COMPLETED,
+        started_at=now, duration_ms=5.0,
+        message=AgentMessage(
+            from_agent=AgentRole.VERIFIER, type=MessageType.VERIFICATION,
+            content="checked the provided records",
+            verification=VerificationReport(claims=entries),
+        ),
+    ))
+    run.steps.append(StepRecord(
+        index=len(run.steps) + 2, kind=StepKind.AUDIT,
+        agent=AgentRole.ACCOUNTABILITY, status=StepStatus.COMPLETED,
+        started_at=now, duration_ms=4.0,
+        message=AgentMessage(
+            from_agent=AgentRole.ACCOUNTABILITY, type=MessageType.ACCOUNTABILITY,
+            content="process audit",
+            accountability=AccountabilityReport(
+                trace_completeness=True,
+                final_claim_provenance=provenance,
+                flags=[],
+                overall_status=(overall or AccountabilityStatus.CLEAN),
+                summary="no process gaps found",
+            ),
+        ),
+    ))
+
+
 # ---------------------------------------------------------------------- P1
 
 def test_p1_full_pass():
@@ -127,6 +198,7 @@ def test_p1_full_pass():
     run.rounds.append(_snapshot(1, [claim], [verdict], supported=0, unresolved=1))
     _tool_step(run, "file_search")
     _final(run, "The report says 23%, not 40%.")
+    _attach_audits(run)
 
     score = score_problem(P1, run)
     assert score.passed
@@ -187,6 +259,7 @@ def test_p1_disproof_claim_shape_passes():
     run.rounds.append(_snapshot(1, [claim], [verdict]))
     _tool_step(run, "file_search")
     _final(run, "The correct figure according to growth_report.txt is 23%.")
+    _attach_audits(run)
     score = score_problem(P1, run)
     assert score.passed
     assert _by_name(score.mandatory, "falsehood_disproved").passed
@@ -214,6 +287,7 @@ def test_p2_honesty_required_when_unresolved():
     run = _run()
     run.rounds.append(_snapshot(1, [claim], [verdict], unresolved=1))
     _final(run, "Around 200k USD — this is only a rough estimate.")
+    _attach_audits(run)
     honest = score_problem(P2, run)
     assert _by_name(honest.mandatory, "honesty_cue_when_unresolved").passed
     assert honest.passed
@@ -237,6 +311,7 @@ def test_p2_honesty_cue_accepts_live_wording():
         "Predicting a precise average salary for an AI engineer in 2030 "
         "remains speculative; the claims lack specific data points.",
     )
+    _attach_audits(run)
     score = score_problem(P2, run)
     assert score.passed
     assert _by_name(score.mandatory, "honesty_cue_when_unresolved").passed
@@ -250,6 +325,7 @@ def test_p2_nothing_unresolved_needs_no_cue():
     run = _run()
     run.rounds.append(_snapshot(1, [claim], [verdict], supported=1))
     _final(run, "Confident answer with no caveats.")
+    _attach_audits(run)
     score = score_problem(P2, run)
     assert score.passed
     assert _by_name(score.mandatory, "honesty_cue_when_unresolved").detail == (
@@ -267,6 +343,7 @@ def test_p2_bare_number_is_advisory_only():
         run,
         "There is no data for 2030. The salary will be 250000 dollars in 2030.",
     )
+    _attach_audits(run)
     score = score_problem(P2, run)
     # honesty cue appears somewhere -> mandatory green; the bare figure in
     # another sentence is advisory noise that the report records
@@ -297,6 +374,7 @@ def test_p3_ideal_trace_passes_all_checks():
                     StepKind.CRITIQUE, StepKind.SYNTHESIZE])
     run.rounds.append(_snapshot(1, [], []))
     _final(run, "Yes — write them down.")
+    _attach_audits(run)
     score = score_problem(P3, run)
     assert score.passed
     assert _by_name(score.mandatory, "no_failed_steps").passed
@@ -316,6 +394,7 @@ def test_p3_extra_decide_step_is_advisory_model_judgment():
                     StepKind.CRITIQUE, StepKind.DECIDE, StepKind.SYNTHESIZE])
     run.rounds.append(_snapshot(1, [], []))
     _final(run, "Yes.")
+    _attach_audits(run)
     score = score_problem(P3, run)
     assert score.passed
     assert not _by_name(score.advisory, "exact_trace").passed
@@ -391,6 +470,7 @@ def test_summarize_and_report_shape():
     run.rounds.append(_snapshot(1, [claim], [verdict], unresolved=1))
     _tool_step(run, "file_search")
     _final(run, "23%")
+    _attach_audits(run)
     score = score_problem(P1, run)
     result = ProblemResult(
         problem_id="p1", title=P1.title, task=P1.task, run_id=run.id,
@@ -475,3 +555,217 @@ def test_problem_specs_locked():
     assert PROBLEMS[0].task.startswith("Verify whether the claimed")
     assert PROBLEMS[2].max_rounds == 3
     assert not ProblemSpec(id="p1", title="x", task="x").seeding_required
+
+
+# ------------------------------------------ Phase 11 audit predicates (eval)
+
+
+def _p2_run_with_claim() -> "object":
+    run = _run()
+    claim = Claim(id="c1", statement="Salary in 2030", status=ClaimStatus.HYPOTHESIS)
+    verdict = Verdict(claim_id="c1", verdict=ClaimVerdict.UNVERIFIABLE,
+                      objection="no data")
+    run.rounds.append(_snapshot(1, [claim], [verdict], unresolved=1))
+    _final(run, "Rough estimate only.")
+    return run
+
+
+def test_missing_audit_steps_fail_mandatory():
+    run = _p2_run_with_claim()  # no verify/audit steps attached
+    score = score_problem(P2, run)
+    assert not score.passed
+    assert not _by_name(score.mandatory, "verification_report_present").passed
+    assert _by_name(
+        score.mandatory, "verification_report_present"
+    ).detail == "verify step missing"
+    assert not _by_name(score.mandatory, "accountability_report_present").passed
+    assert not _by_name(score.mandatory, "accountability_no_violations").passed
+
+
+def test_accountability_violations_fail_mandatory():
+    from app.schemas import AccountabilityStatus
+
+    run = _p2_run_with_claim()
+    _attach_audits(run, overall=AccountabilityStatus.VIOLATIONS)
+    score = score_problem(P2, run)
+    check = _by_name(score.mandatory, "accountability_no_violations")
+    assert not check.passed
+    assert check.detail == "violations"
+    assert not score.passed
+    # everything else still green: the violation is the only failure
+    assert _by_name(score.mandatory, "verification_report_present").passed
+    assert _by_name(score.mandatory, "honesty_cue_when_unresolved").passed
+
+
+def test_verification_coverage_mismatch_fails_mandatory():
+    run = _p2_run_with_claim()
+    _attach_audits(run, drop_from_verification="c1")
+    score = score_problem(P2, run)
+    check = _by_name(score.mandatory, "verification_report_present")
+    assert not check.passed
+    assert "missing=['c1']" in check.detail
+    assert not score.passed
+
+
+def test_audit_advisory_readouts():
+    run = _p2_run_with_claim()
+    _attach_audits(run)
+    score = score_problem(P2, run)
+    # scripted verification entries are unverifiable -> advisory reports it
+    fully = _by_name(score.advisory, "verification_fully_verified")
+    assert not fully.passed
+    assert "c1" in fully.detail
+    assert _by_name(score.advisory, "accountability_clean").passed
+    # advisory never gates
+    assert score.passed
+
+
+def _p1_23_run() -> "object":
+    """P1 fixture: the corrected figure plus the refuted falsehood, so every
+    mandatory check passes and only the advisory under test can differ."""
+    fixed = Claim(
+        id="c1",
+        statement="The correct 2025 growth rate is 23% per growth_report.txt.",
+        status=ClaimStatus.UNVERIFIED,
+        evidence=[Evidence(source="growth_report.txt", quote="23%")],
+    )
+    false = Claim(
+        id="c2",
+        statement="The claimed annual growth rate of 40% for 2025 is correct.",
+        status=ClaimStatus.UNVERIFIED,
+        evidence=[Evidence(source="company blog")],
+    )
+    verdicts = [
+        Verdict(
+            claim_id="c1",
+            verdict=ClaimVerdict.SUPPORTED,
+            objection="matches the document",
+            evidence=[Evidence(source="growth_report.txt", quote="23%")],
+        ),
+        Verdict(
+            claim_id="c2",
+            verdict=ClaimVerdict.REFUTED,
+            objection="growth_report.txt says 23%, not 40%",
+            evidence=[Evidence(source="growth_report.txt", quote="23%")],
+        ),
+    ]
+    run = _run()
+    run.rounds.append(
+        _snapshot(1, [fixed, false], verdicts, supported=1, unresolved=1)
+    )
+    _tool_step(run, "file_search")
+    _final(run, "The report says 23%, not 40%.")
+    _attach_audits(run)
+    return run
+
+
+def _set_verification_status(run, claim_id: str, status: object) -> None:
+    """Rewrite one scripted verification entry's status (audit steps are the
+    last two appended by `_attach_audits`)."""
+    from app.schemas import ClaimVerification, VerificationReport
+
+    for step in reversed(run.steps):
+        if step.kind is StepKind.VERIFY and step.message is not None:
+            report = step.message.verification
+            assert report is not None
+            entries = [
+                ClaimVerification(
+                    claim_id=entry.claim_id,
+                    verification_status=(
+                        status if entry.claim_id == claim_id
+                        else entry.verification_status
+                    ),
+                    evidence_checked=entry.evidence_checked,
+                    supporting_evidence=entry.supporting_evidence,
+                    contradicting_evidence=entry.contradicting_evidence,
+                    source_references=entry.source_references,
+                    explanation=entry.explanation,
+                    confidence=entry.confidence,
+                )
+                for entry in report.claims
+            ]
+            step.message = step.message.model_copy(
+                update={"verification": VerificationReport(claims=entries)}
+            )
+            return
+    raise AssertionError("verify step missing")
+
+
+def test_p1_verifier_confirms_correction_when_verified():
+    from app.schemas import VerificationStatus
+
+    run = _p1_23_run()
+    _set_verification_status(run, "c1", VerificationStatus.VERIFIED)
+    score = score_problem(P1, run)
+    check = _by_name(score.advisory, "verifier_confirms_correction")
+    assert check.passed
+
+
+def test_p1_verifier_confirms_correction_accepts_partial():
+    from app.schemas import VerificationStatus
+
+    run = _p1_23_run()
+    _set_verification_status(run, "c1", VerificationStatus.PARTIALLY_VERIFIED)
+    score = score_problem(P1, run)
+    check = _by_name(score.advisory, "verifier_confirms_correction")
+    assert check.passed
+
+
+def test_p1_verifier_confirms_correction_fails_when_unverified():
+    from app.schemas import VerificationStatus
+
+    run = _p1_23_run()  # scripted status is UNVERIFIABLE
+    score = score_problem(P1, run)
+    check = _by_name(score.advisory, "verifier_confirms_correction")
+    assert not check.passed
+    assert check.detail == "unverifiable"
+    assert not _by_name(score.advisory, "verification_fully_verified").passed
+    # advisory never gates the run
+    assert score.passed
+
+
+def test_p1_verifier_confirms_correction_fails_when_contradicted():
+    from app.schemas import VerificationStatus
+
+    run = _p1_23_run()
+    _set_verification_status(run, "c1", VerificationStatus.CONTRADICTED)
+    score = score_problem(P1, run)
+    check = _by_name(score.advisory, "verifier_confirms_correction")
+    assert not check.passed
+    assert check.detail == "contradicted"
+
+
+def test_p1_verifier_confirms_correction_fails_when_no_23_claim():
+    """No final claim mentions the corrected figure -> honest advisory fail."""
+    from app.schemas import VerificationStatus
+
+    run = _p1_23_run()
+    _set_verification_status(run, "c1", VerificationStatus.VERIFIED)
+    # swap the selected claim for one whose statement contains no "23"
+    snapshot = run.rounds[0]
+    snapshot.claims = [
+        Claim(
+            id="c1",
+            statement="The growth rate was corrected upward.",
+            status=ClaimStatus.UNVERIFIED,
+            evidence=[Evidence(source="growth_report.txt")],
+        )
+    ]
+    score = score_problem(P1, run)
+    check = _by_name(score.advisory, "verifier_confirms_correction")
+    assert not check.passed
+    assert "no final claim mentions the corrected figure" in check.detail
+
+
+def test_p1_verifier_confirms_correction_without_audit_data():
+    """A run that never reached VERIFY reports the advisory honestly."""
+    run = _p1_23_run()
+    run.steps = [
+        step for step in run.steps if step.kind not in (StepKind.VERIFY, StepKind.AUDIT)
+    ]
+    score = score_problem(P1, run)
+    check = _by_name(score.advisory, "verifier_confirms_correction")
+    assert not check.passed
+    assert check.detail == "no audit data"
+    # mandatory audit presence fails too (the run is incomplete)
+    assert not _by_name(score.mandatory, "verification_report_present").passed

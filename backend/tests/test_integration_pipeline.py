@@ -52,15 +52,20 @@ async def test_full_iterative_pipeline_completes():
     assert run.final_message.content.strip()
     assert run.duration_ms is not None
 
-    # ---- structural trace (Phase 5 PRD §9) ----
+    # ---- structural trace (Phase 5 PRD §9 + Phase 11 audits) ----
     kinds = [s.kind for s in run.steps]
     assert kinds[:4] == [
         StepKind.PLAN, StepKind.RESEARCH, StepKind.IDEATE, StepKind.CRITIQUE,
     ]
-    assert kinds[-1] is StepKind.SYNTHESIZE
+    # every completed run now ends synthesize -> verify -> audit
+    assert kinds[-3:] == [StepKind.SYNTHESIZE, StepKind.VERIFY, StepKind.AUDIT]
+    # both audit steps must have actually run (never skipped) — §9.2
+    assert run.steps[-2].status is StepStatus.COMPLETED
+    assert run.steps[-1].status is StepStatus.COMPLETED
     assert set(kinds) <= {
         StepKind.PLAN, StepKind.RESEARCH, StepKind.IDEATE, StepKind.CRITIQUE,
         StepKind.DECIDE, StepKind.REVISE, StepKind.SYNTHESIZE,
+        StepKind.VERIFY, StepKind.AUDIT,
     }
     for step in run.steps:
         assert step.status in {StepStatus.COMPLETED, StepStatus.SKIPPED}
@@ -73,13 +78,42 @@ async def test_full_iterative_pipeline_completes():
                 assert step.message.content.strip()
             else:
                 # a completed work step must carry substance somewhere:
-                # prose, claims, or verdicts (empty-only output would have
-                # raised EmptyAgentResponseError inside Agent.run)
+                # prose, claims, verdicts, or an audit report (empty-only
+                # output would have raised EmptyAgentResponseError in Agent.run)
                 assert (
                     step.message.content.strip()
                     or step.message.claims
                     or step.message.verdicts
+                    or step.message.verification
+                    or step.message.accountability
                 ), f"{step.kind.value} step {step.index} had no substance"
+
+    # ---- Phase 11: audits ran, cover the final claims, stay consistent ----
+    from app.orchestrator import select_best_round
+
+    selected = select_best_round(run.rounds)
+    verify_message = run.steps[-2].message
+    assert verify_message is not None
+    assert verify_message.verification is not None
+    assert sorted(
+        entry.claim_id for entry in verify_message.verification.claims
+    ) == sorted(claim.id for claim in selected.claims)
+    audit_message = run.steps[-1].message
+    assert audit_message is not None
+    assert audit_message.accountability is not None
+    # enforcement makes provenance code-canonical: it matches the selected
+    # round exactly regardless of what the model produced
+    assert [
+        provenance.claim_id
+        for provenance in audit_message.accountability.final_claim_provenance
+    ] == [claim.id for claim in selected.claims]
+    assert audit_message.accountability.trace_completeness is True
+    # a healthy run must not audit itself into violations (§9.2)
+    from app.schemas import AccountabilityStatus
+
+    assert audit_message.accountability.overall_status is not (
+        AccountabilityStatus.VIOLATIONS
+    )
 
     # round numbering: round-tagged steps strictly increase; plan/synth untagged
     assert run.steps[0].round is None and run.steps[-1].round is None

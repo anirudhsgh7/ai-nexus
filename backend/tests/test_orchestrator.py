@@ -1,17 +1,27 @@
-"""Iterative orchestration contract (Phase 5 PRD §6.3–6.7).
+"""Iterative orchestration contract (Phase 5 PRD §6.3–6.7 + Phase 11 §6.7).
 
 Fixtures are queued to FakeProvider in exact request order (documented per
 test). Two chains exist: SIMPLE (all claims supported -> deterministic finish,
-Phase 4-compatible 5-step shape) and ITERATIVE (unresolved -> decide -> revise
--> re-critique -> decide -> synthesize).
+Phase 4-compatible shape) and ITERATIVE (unresolved -> decide -> revise ->
+re-critique -> decide -> synthesize). Every completed chain then runs the two
+Phase 11 audit steps (verify, audit); `AuditAwareFakeProvider` synthesizes
+those responses from the request itself because static payloads cannot satisfy
+`validate_verification`'s coverage rule (each chain's selected-round claim ids
+differ). Audit content semantics are tested in test_audits/test_agents_audit;
+this module owns orchestration shape and isolation.
 """
 
 import asyncio
 import json
+import re
+from datetime import UTC, datetime
 
 import pytest
 
 from app.agents import build_registry
+from app.agents.structured import ACCOUNTABILITY_SCHEMA, VERIFICATION_SCHEMA
+from app.audits import compute_audit_facts
+from app.llm.base import ChatRole
 from app.orchestrator import (
     MAX_TOTAL_STEPS,
     ROUND_ONE_STEPS,
@@ -20,11 +30,13 @@ from app.orchestrator import (
     PoolState,
     QualifiedClaim,
     qualify_claims,
+    render_accountability_context,
     render_decision_summary,
     render_evidence_board,
     render_iteration_history,
     render_revision_context,
     render_synthesis_context,
+    render_verification_context,
     resolve_claim,
     select_best_round,
 )
@@ -32,22 +44,30 @@ from app.runs import (
     RoundSnapshot,
     RunEventType,
     RunManager,
+    RunRecord,
     RunStatus,
     StepKind,
+    StepRecord,
     StepStatus,
 )
 from app.schemas import (
+    AccountabilityFlagKind,
+    AccountabilityStatus,
+    AgentMessage,
     AgentRole,
     Claim,
     ClaimStatus,
     ClaimVerdict,
+    ClaimVerification,
     DecisionAction,
     Evidence,
     ManagerDecision,
     MessageType,
+    VerificationReport,
+    VerificationStatus,
     Verdict,
 )
-from tests.fakes import FakeProvider
+from tests.fakes import AuditAwareFakeProvider, FakeProvider
 
 TASK = "Should we build X?"
 
@@ -133,8 +153,11 @@ CRITIQUE_R2_ALL_UNVER = _verdicts_payload("Critique prose round 2.", [
 ])
 
 
-async def _run_pipeline(payloads, *, max_rounds: int = 3):
-    provider = FakeProvider()
+async def _run_pipeline(payloads, *, max_rounds: int = 3,
+                        audit_error: Exception | None = None,
+                        verify_error: Exception | None = None):
+    provider = AuditAwareFakeProvider(fail_audit=audit_error,
+                                      fail_verify=verify_error)
     for item in payloads:
         provider.queue_result(
             item if isinstance(item, Exception) else FakeProvider.make_result(item)
@@ -478,10 +501,12 @@ async def test_simple_path_stops_at_round_one():
     provider, store, run = await _simple_pipeline()
     assert run.status is RunStatus.COMPLETED
     assert run.error is None
-    assert len(provider.chat_calls) == 5, "no decision call may happen"
+    # 5 pipeline calls + verify + audit; NO decision call may happen
+    assert len(provider.chat_calls) == 7, "no decision call may happen"
     assert [s.kind for s in run.steps] == [
         StepKind.PLAN, StepKind.RESEARCH, StepKind.IDEATE,
-        StepKind.CRITIQUE, StepKind.SYNTHESIZE,
+        StepKind.CRITIQUE, StepKind.SYNTHESIZE, StepKind.VERIFY,
+        StepKind.AUDIT,
     ]
     assert all(s.status is StepStatus.COMPLETED for s in run.steps)
     # no synthetic decision: all steps ran through the LLM
@@ -492,11 +517,11 @@ async def test_simple_path_event_shape_matches_phase4():
     _, _, run = await _simple_pipeline()
     types = [e.type for e in run.events]
     expected = [RunEventType.RUN_STARTED]
-    for _ in range(5):
+    for _ in range(7):  # plan research ideate critique synthesize verify audit
         expected += [RunEventType.STEP_STARTED, RunEventType.STEP_COMPLETED]
     expected += [RunEventType.RUN_COMPLETED]
     assert types == expected
-    assert [e.seq for e in run.events] == list(range(1, 13))
+    assert [e.seq for e in run.events] == list(range(1, 17))
 
 
 async def test_simple_path_single_round_snapshot():
@@ -541,7 +566,7 @@ async def test_final_message_and_step_rounds():
     _, _, run = await _simple_pipeline()
     assert run.final_message is not None
     assert run.final_message.content == "Final answer."
-    assert [s.round for s in run.steps] == [None, 1, 1, 1, None]
+    assert [s.round for s in run.steps] == [None, 1, 1, 1, None, None, None]
 
 
 # ================================================================= iterative path
@@ -554,16 +579,18 @@ async def _iterative_pipeline():
     ])
 
 
-async def test_iterative_nine_step_trace():
+async def test_iterative_full_step_trace():
     provider, store, run = await _iterative_pipeline()
     assert run.status is RunStatus.COMPLETED
-    assert len(provider.chat_calls) == 9
+    assert len(provider.chat_calls) == 11  # 9 + verify + audit
     assert [s.kind for s in run.steps] == [
         StepKind.PLAN, StepKind.RESEARCH, StepKind.IDEATE, StepKind.CRITIQUE,
         StepKind.DECIDE, StepKind.REVISE, StepKind.CRITIQUE, StepKind.DECIDE,
-        StepKind.SYNTHESIZE,
+        StepKind.SYNTHESIZE, StepKind.VERIFY, StepKind.AUDIT,
     ]
-    assert [s.round for s in run.steps] == [None, 1, 1, 1, 1, 2, 2, 2, None]
+    assert [s.round for s in run.steps] == [
+        None, 1, 1, 1, 1, 2, 2, 2, None, None, None,
+    ]
     assert all(s.status is StepStatus.COMPLETED for s in run.steps)
 
 
@@ -571,11 +598,11 @@ async def test_iterative_event_sequence_and_rounds():
     _, _, run = await _iterative_pipeline()
     types = [e.type for e in run.events]
     expected = [RunEventType.RUN_STARTED]
-    for _ in range(9):
+    for _ in range(11):
         expected += [RunEventType.STEP_STARTED, RunEventType.STEP_COMPLETED]
     expected += [RunEventType.RUN_COMPLETED]
     assert types == expected
-    assert [e.seq for e in run.events] == list(range(1, 21))
+    assert [e.seq for e in run.events] == list(range(1, 25))
     decide_events = [
         e for e in run.events
         if e.type is RunEventType.STEP_COMPLETED and e.kind is StepKind.DECIDE
@@ -664,19 +691,25 @@ async def test_synthesis_uses_best_round_material():
 
 # ================================================================= guards
 
+
+def _synthetic_decide(run) -> StepRecord:
+    """The guard's skipped DECIDE (its position moves once verify/audit follow)."""
+    return next(s for s in run.steps if s.skipped and s.kind is StepKind.DECIDE)
+
+
 async def test_guard_round_cap_forces_finish():
     provider, store, run = await _run_pipeline(
         [PLAN_JSON, RESEARCH_JSON, IDEATION_JSON, CRITIQUE_R1, SYNTHESIS_JSON],
         max_rounds=1,
     )
     assert run.status is RunStatus.COMPLETED
-    # 4 pipeline calls + synthesis; NO decision call
-    assert len(provider.chat_calls) == 5, "no decision call once capped"
+    # 4 pipeline calls + synthesis + verify + audit; NO decision call
+    assert len(provider.chat_calls) == 7, "no decision call once capped"
     assert [s.kind for s in run.steps] == [
         StepKind.PLAN, StepKind.RESEARCH, StepKind.IDEATE, StepKind.CRITIQUE,
-        StepKind.DECIDE, StepKind.SYNTHESIZE,
+        StepKind.DECIDE, StepKind.SYNTHESIZE, StepKind.VERIFY, StepKind.AUDIT,
     ]
-    synthetic = run.steps[-2]
+    synthetic = _synthetic_decide(run)
     assert synthetic.skipped and synthetic.status is StepStatus.SKIPPED
     assert synthetic.kind is StepKind.DECIDE
     assert synthetic.message is not None
@@ -693,13 +726,13 @@ async def test_guard_repeated_decision_forces_finish():
         SYNTHESIS_JSON,
     ])
     assert run.status is RunStatus.COMPLETED
-    assert len(provider.chat_calls) == 9
+    assert len(provider.chat_calls) == 11  # 9 + verify + audit
     assert [s.kind for s in run.steps] == [
         StepKind.PLAN, StepKind.RESEARCH, StepKind.IDEATE, StepKind.CRITIQUE,
         StepKind.DECIDE, StepKind.REVISE, StepKind.CRITIQUE, StepKind.DECIDE,
-        StepKind.DECIDE, StepKind.SYNTHESIZE,
+        StepKind.DECIDE, StepKind.SYNTHESIZE, StepKind.VERIFY, StepKind.AUDIT,
     ]
-    synthetic = run.steps[-2]
+    synthetic = _synthetic_decide(run)
     assert synthetic.skipped and synthetic.message.decision.reason == "repeated decision"
 
 
@@ -719,26 +752,28 @@ async def test_guard_no_progress_revision_forces_finish():
         SYNTHESIS_JSON,
     ])
     assert run.status is RunStatus.COMPLETED
-    assert len(provider.chat_calls) == 7
+    assert len(provider.chat_calls) == 9  # 7 + verify + audit
     assert [s.kind for s in run.steps] == [
         StepKind.PLAN, StepKind.RESEARCH, StepKind.IDEATE, StepKind.CRITIQUE,
         StepKind.DECIDE, StepKind.REVISE, StepKind.DECIDE, StepKind.SYNTHESIZE,
+        StepKind.VERIFY, StepKind.AUDIT,
     ]
-    synthetic = run.steps[-2]
+    synthetic = _synthetic_decide(run)
     assert synthetic.skipped
     assert synthetic.message.decision.reason == "revision produced no progress"
     # The synthetic decide closes the round the revise opened: both carry the
     # pending round (2), never the previous round — group labels stay monotonic
     # (Setup / Round 1 / Round 2 / Wrap-up, no phantom Round 1 after Round 2).
-    revise = run.steps[-3]
-    assert revise.kind is StepKind.REVISE
+    revise = next(s for s in run.steps if s.kind is StepKind.REVISE)
     assert revise.round == 2
     assert synthetic.round == 2
     # An aborted round is not recorded as a snapshot: best-round selection
     # keeps round 1 (identical counts would otherwise tiebreak to a round with
     # no evaluated claims).
     assert len(run.rounds) == 1
-    assert [s.round for s in run.steps] == [None, 1, 1, 1, 1, 2, 2, None]
+    assert [s.round for s in run.steps] == [
+        None, 1, 1, 1, 1, 2, 2, None, None, None,
+    ]
 
 
 async def test_guard_step_cap_forces_finish(monkeypatch):
@@ -747,9 +782,9 @@ async def test_guard_step_cap_forces_finish(monkeypatch):
         [PLAN_JSON, RESEARCH_JSON, IDEATION_JSON, CRITIQUE_R1, SYNTHESIS_JSON]
     )
     assert run.status is RunStatus.COMPLETED
-    assert len(provider.chat_calls) == 5  # 4 capped steps + synthesis
-    assert run.steps[-2].message.decision.reason == "step cap reached"
-    assert len(run.steps) == 6
+    assert len(provider.chat_calls) == 7  # 4 capped steps + synthesis + audits
+    assert _synthetic_decide(run).message.decision.reason == "step cap reached"
+    assert len(run.steps) == 8  # 4 + synthetic decide + synthesize + verify + audit
 
 
 # ================================================================= degenerate paths
@@ -760,19 +795,26 @@ async def test_zero_claims_skips_critique_and_finishes():
     provider, store, run = await _run_pipeline(
         [PLAN_JSON, empty_research, empty_ideation, SYNTHESIS_JSON]
     )
-    assert len(provider.chat_calls) == 4
+    assert len(provider.chat_calls) == 6  # plan research ideate synth verify audit
     assert run.status is RunStatus.COMPLETED
     assert [s.status for s in run.steps] == [
         StepStatus.COMPLETED, StepStatus.COMPLETED, StepStatus.COMPLETED,
-        StepStatus.SKIPPED, StepStatus.COMPLETED,
+        StepStatus.SKIPPED, StepStatus.COMPLETED, StepStatus.COMPLETED,
+        StepStatus.COMPLETED,
     ]
-    assert [s.round for s in run.steps] == [None, 1, 1, 1, None]
+    assert [s.round for s in run.steps] == [None, 1, 1, 1, None, None, None]
     assert len(run.rounds) == 1 and run.rounds[0].unresolved_count == 0
 
     synthesis_user = provider.chat_calls[3]["messages"][1].content
     assert "(skipped: no claims were produced to evaluate)" in synthesis_user
     assert "EVALUATED CLAIMS:\n(none)" in synthesis_user
     assert synthesis_user.endswith("REMAINING UNRESOLVED:\n(none)")
+
+    # Phase 11 §6.7: the verifier still runs and must return an empty report
+    verify = next(s for s in run.steps if s.kind is StepKind.VERIFY)
+    assert verify.message is not None
+    assert verify.message.verification is not None
+    assert verify.message.verification.claims == []
 
 
 async def test_researcher_failure_aborts_run():
@@ -835,3 +877,295 @@ async def test_cancellation_marks_run_failed():
     assert run.error.type == "ServerShutdown"
     assert run.steps[-1].status is StepStatus.FAILED
     assert run.events[-1].type is RunEventType.RUN_FAILED
+
+
+# ================================================== Phase 11 audit steps
+
+
+def _step_record(index, kind, agent, *, round=None, skipped=False,
+                 message=None) -> StepRecord:
+    return StepRecord(
+        index=index, kind=kind, agent=agent,
+        status=StepStatus.SKIPPED if skipped else StepStatus.COMPLETED,
+        started_at=datetime.now(UTC), round=round, skipped=skipped,
+        message=message,
+    )
+
+
+def _verification_entry(cid: str, status: VerificationStatus,
+                        *, supporting=None, sources=None) -> ClaimVerification:
+    return ClaimVerification(
+        claim_id=cid,
+        verification_status=status,
+        evidence_checked=["doc"] if supporting else [],
+        supporting_evidence=supporting or [],
+        source_references=sources or [],
+        explanation="checked the record",
+        confidence=0.8,
+    )
+
+
+def test_render_verification_context_golden():
+    claims = [
+        Claim(id="c1", statement="A", status=ClaimStatus.FACT,
+              evidence=[Evidence(source="doc A")]),
+        Claim(id="c2", statement="B"),
+        Claim(id="c3", statement="C"),
+    ]
+    verdicts = [
+        Verdict(claim_id="c1", verdict=ClaimVerdict.SUPPORTED,
+                objection="doc A holds"),
+        Verdict(claim_id="c2", verdict=ClaimVerdict.REFUTED,
+                objection="no source exists"),
+    ]
+    out = render_verification_context("Final answer.", claims, verdicts)
+    assert out == (
+        "FINAL ANSWER:\nFinal answer.\n\n"
+        "PRIOR VERDICTS (context only — never grounds for verification):\n"
+        "[c1] supported — doc A holds\n"
+        "[c2] refuted — no source exists\n"
+        "[c3] none"
+    )
+
+
+def test_render_verification_context_empty_claims():
+    out = render_verification_context("Answer.", [], [])
+    assert out == (
+        "FINAL ANSWER:\nAnswer.\n\n"
+        "PRIOR VERDICTS (context only — never grounds for verification): (none)"
+    )
+
+
+def _golden_audit_run() -> RunRecord:
+    run = RunManager().create(TASK)
+    synth_msg = AgentMessage(
+        from_agent=AgentRole.MANAGER, type=MessageType.SYNTHESIS,
+        content="Final answer.",
+    )
+    decide_msg = AgentMessage(
+        from_agent=AgentRole.MANAGER, type=MessageType.DECISION, content="",
+        decision=ManagerDecision(
+            action=DecisionAction.CALL_AGENT, target=AgentRole.RESEARCHER,
+            instruction="find a source", reason="evidence gap", confidence=0.8,
+        ),
+    )
+    guard_msg = AgentMessage(
+        from_agent=AgentRole.MANAGER, type=MessageType.DECISION, content="",
+        decision=ManagerDecision(
+            action=DecisionAction.FINISH,
+            reason="revision produced no progress", confidence=0.0,
+        ),
+    )
+    run.steps.extend([
+        _step_record(1, StepKind.PLAN, AgentRole.MANAGER),
+        _step_record(2, StepKind.RESEARCH, AgentRole.RESEARCHER, round=1),
+        _step_record(3, StepKind.IDEATE, AgentRole.IDEATOR, round=1),
+        _step_record(4, StepKind.CRITIQUE, AgentRole.SKEPTIC, round=1),
+        _step_record(5, StepKind.DECIDE, AgentRole.MANAGER, round=1,
+                    message=decide_msg),
+        _step_record(6, StepKind.REVISE, AgentRole.RESEARCHER, round=2),
+        _step_record(7, StepKind.DECIDE, AgentRole.MANAGER, round=2,
+                    skipped=True, message=guard_msg),
+        _step_record(8, StepKind.SYNTHESIZE, AgentRole.MANAGER, message=synth_msg),
+        _step_record(9, StepKind.VERIFY, AgentRole.VERIFIER),
+    ])
+    claims = [
+        Claim(id="c1", statement="Holds.", status=ClaimStatus.FACT,
+              evidence=[Evidence(source="doc")]),
+        Claim(id="c2", statement="Open."),
+    ]
+    verdicts = [
+        Verdict(claim_id="c1", verdict=ClaimVerdict.SUPPORTED, objection="holds"),
+        Verdict(claim_id="c2", verdict=ClaimVerdict.UNVERIFIABLE,
+                objection="no corroboration"),
+    ]
+    origins = {"c1": AgentRole.RESEARCHER, "c2": AgentRole.IDEATOR}
+    for number in (1, 2):
+        run.rounds.append(RoundSnapshot(
+            round_number=number, claims=claims, origins=origins,
+            verdicts=verdicts, worker_content={}, skeptic_content="",
+            supported_count=1, unresolved_count=1,
+        ))
+    return run
+
+
+def test_render_accountability_context_golden():
+    run = _golden_audit_run()
+    facts = compute_audit_facts(run.rounds, run.steps, "Final answer.")
+    verification = VerificationReport(claims=[
+        _verification_entry("c1", VerificationStatus.VERIFIED,
+                            supporting=[Evidence(source="doc")],
+                            sources=["doc"]),
+        _verification_entry("c2", VerificationStatus.UNVERIFIABLE),
+    ])
+    out = render_accountability_context(run, facts, verification)
+    assert out == (
+        "RUN TRACE FACTS:\n"
+        "steps: plan=completed research=completed ideate=completed "
+        "critique=completed decide=completed revise=completed decide=skipped "
+        "synthesize=completed verify=completed\n"
+        "decisions: r1 call_agent→researcher confidence=0.80 | "
+        "r2 guard_finish(revision produced no progress)\n"
+        "guards: round 2 revision produced no progress\n"
+        "failed_steps: none\n"
+        "retries: total=0 steps=[]\n"
+        "selected_round: 2 supported=1 unresolved=1\n"
+        "final_claims: 2\n"
+        "\n"
+        "FINAL CLAIM PROVENANCE:\n"
+        "[c1] origin=researcher verdict=supported evidence=1\n"
+        "[c2] origin=ideator verdict=unverifiable evidence=0\n"
+        "\n"
+        "UNRESOLVED AT SYNTHESIS:\n"
+        "[c2] (ideator) verdict=unverifiable — no corroboration\n"
+        "\n"
+        "VERIFICATION SUMMARY:\n"
+        "verified=1 partially_verified=0 contradicted=0 unverifiable=1\n"
+        "\n"
+        "FINAL ANSWER:\n"
+        "Final answer.\n"
+        "\n"
+        "FACT ENTRIES (every entry MUST appear in your flags with the same "
+        "kind/severity/refs):\n"
+        "- kind=unsupported_final_claim severity=warning refs=[c2] "
+        "detail=final claim has no supported verdict\n"
+        "- kind=unresolved_claim_suppressed severity=warning refs=[c2] "
+        "detail=final answer neither names the unresolved claims nor admits "
+        "uncertainty\n"
+        "- kind=premature_stop severity=warning refs=[2] "
+        "detail=guard stopped the run while unresolved claims remained"
+    )
+
+
+def test_render_accountability_context_caps_unresolved_at_ten():
+    run = RunManager().create(TASK)
+    claims = [
+        Claim(id=f"c{i}", statement=f"s{i}") for i in range(1, 13)
+    ]
+    run.rounds.append(RoundSnapshot(
+        round_number=1, claims=claims,
+        origins={c.id: AgentRole.RESEARCHER for c in claims},
+        verdicts=[], worker_content={}, skeptic_content="",
+        supported_count=0, unresolved_count=12,
+    ))
+    facts = compute_audit_facts(run.rounds, [], None)
+    out = render_accountability_context(run, facts, None)
+    assert "... and 2 more unresolved claims" in out
+
+
+async def test_audit_inputs_contain_no_worker_prose():
+    provider, _, _ = await _simple_pipeline()
+    verify_call = next(
+        c for c in provider.chat_calls
+        if c["kwargs"].get("response_format") is VERIFICATION_SCHEMA
+    )
+    verify_user = verify_call["messages"][1].content
+    assert "FINAL ANSWER:\nFinal answer." in verify_user
+    assert "CLAIMS TO EVALUATE:" in verify_user
+    assert "PRIOR VERDICTS (context only" in verify_user
+    for prose in ("Research prose.", "Ideation prose.",
+                  "Critique prose.", "Plan prose."):
+        assert prose not in verify_user, prose
+
+    audit_call = next(
+        c for c in provider.chat_calls
+        if c["kwargs"].get("response_format") is ACCOUNTABILITY_SCHEMA
+    )
+    audit_user = audit_call["messages"][1].content
+    assert "RUN TRACE FACTS:" in audit_user
+    assert "FACT ENTRIES" in audit_user
+    assert "FINAL ANSWER:\nFinal answer." in audit_user
+    for prose in ("Research prose.", "Ideation prose.", "Critique prose."):
+        assert prose not in audit_user, prose
+
+
+async def test_audit_enforcement_merges_facts_into_report():
+    _, _, run = await _iterative_pipeline()
+    audit_step = run.steps[-1]
+    assert audit_step.kind is StepKind.AUDIT
+    report = audit_step.message.accountability
+    assert report is not None
+    # The provider said "clean" with empty provenance — code-canonical facts
+    # must have overridden both (PRD §6.5.4).
+    assert report.overall_status is AccountabilityStatus.WARNINGS
+    kinds = {flag.kind for flag in report.flags}
+    assert AccountabilityFlagKind.UNSUPPORTED_FINAL_CLAIM in kinds
+    assert AccountabilityFlagKind.UNRESOLVED_CLAIM_SUPPRESSED in kinds
+    unsupported = next(
+        flag for flag in report.flags
+        if flag.kind is AccountabilityFlagKind.UNSUPPORTED_FINAL_CLAIM
+    )
+    # c3 is the ideator's carried claim (only the researcher's claims are
+    # dropped on revision) and c5 is the unverifiable revision addition
+    assert unsupported.refs == ["c3", "c5"]
+    assert [p.claim_id for p in report.final_claim_provenance] == [
+        "c2", "c3", "c4", "c5",
+    ]
+    assert report.trace_completeness is True
+    # enforcement left the persisted message and event identical (transform
+    # runs before publication — assert the step record carries it)
+    assert audit_step.message is not None
+
+
+async def test_audit_step_failure_fails_run():
+    from app.llm.base import ProviderUnavailableError
+
+    provider, store, run = await _run_pipeline(
+        [PLAN_JSON, RESEARCH_SIMPLE, IDEATION_SIMPLE, CRITIQUE_ALL_SUPPORTED,
+         SYNTHESIS_JSON],
+        audit_error=ProviderUnavailableError(),
+    )
+    assert run.status is RunStatus.FAILED
+    audit = run.steps[-1]
+    assert audit.kind is StepKind.AUDIT
+    assert audit.status is StepStatus.FAILED
+    assert audit.error is not None
+    assert audit.error.type == "ProviderUnavailableError"
+    # the answer is not final without its audits
+    assert run.final_message is None
+    assert run.events[-1].type is RunEventType.RUN_FAILED
+    assert run.events[-1].kind is StepKind.AUDIT
+    # verify step completed before the audit failure
+    assert run.steps[-2].kind is StepKind.VERIFY
+    assert run.steps[-2].status is StepStatus.COMPLETED
+
+
+async def test_verify_step_failure_fails_run_and_skips_audit():
+    """A VERIFY failure follows the single failure path: step FAILED, run
+    FAILED, AUDIT never runs, no final message (PRD §6.7 / §8)."""
+    from app.llm.base import ProviderUnavailableError
+
+    provider, store, run = await _run_pipeline(
+        [PLAN_JSON, RESEARCH_SIMPLE, IDEATION_SIMPLE, CRITIQUE_ALL_SUPPORTED,
+         SYNTHESIS_JSON],
+        verify_error=ProviderUnavailableError(),
+    )
+    assert run.status is RunStatus.FAILED
+    verify = run.steps[-1]
+    assert verify.kind is StepKind.VERIFY
+    assert verify.status is StepStatus.FAILED
+    assert verify.error is not None
+    assert verify.error.type == "ProviderUnavailableError"
+    # the audit never runs after a failed verification
+    assert not any(step.kind is StepKind.AUDIT for step in run.steps)
+    assert run.final_message is None
+    assert run.events[-1].type is RunEventType.RUN_FAILED
+    assert run.events[-1].kind is StepKind.VERIFY
+    # synthesis completed before the verification failure
+    assert run.steps[-2].kind is StepKind.SYNTHESIZE
+    assert run.steps[-2].status is StepStatus.COMPLETED
+
+
+async def test_audits_complete_without_injected_errors():
+    """Baseline: both audit steps run to completion on a healthy chain."""
+    provider, store, run = await _run_pipeline(
+        [PLAN_JSON, RESEARCH_SIMPLE, IDEATION_SIMPLE, CRITIQUE_ALL_SUPPORTED,
+         SYNTHESIS_JSON],
+    )
+    assert run.status is RunStatus.COMPLETED
+    assert [s.kind for s in run.steps][-2:] == [StepKind.VERIFY, StepKind.AUDIT]
+    assert all(
+        step.status is StepStatus.COMPLETED for step in run.steps
+    )
+    # the answer is only final after both audits passed
+    assert run.final_message is not None

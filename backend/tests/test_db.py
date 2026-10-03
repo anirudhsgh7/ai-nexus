@@ -34,17 +34,23 @@ from app.runs import (
     StepStatus,
 )
 from app.schemas import (
+    AccountabilityReport,
+    AccountabilityStatus,
     AgentMessage,
     AgentRole,
     Claim,
+    ClaimProvenance,
     ClaimStatus,
     ClaimVerdict,
+    ClaimVerification,
     DecisionAction,
     Evidence,
     ManagerDecision,
     MessageType,
     ToolResult,
     Verdict,
+    VerificationReport,
+    VerificationStatus,
 )
 
 T0 = datetime(2026, 9, 30, 12, 0, 0, tzinfo=UTC)
@@ -76,7 +82,153 @@ def test_migration_creates_all_tables(store: RunStore, tmp_path: Path):
         "runs", "steps", "messages", "claims", "claim_evidence", "verdicts",
         "verdict_evidence", "tool_calls", "rounds", "events",
     } <= names
-    assert version == SCHEMA_VERSION == 1
+    assert version == SCHEMA_VERSION == 2
+
+
+def test_migration_v1_upgrades_to_v2(tmp_path: Path):
+    """A populated pre-Phase-11 DB gains the audit columns with defaults."""
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(MIGRATIONS[0])  # v1 DDL only
+    conn.execute("PRAGMA user_version = 1")
+    conn.execute(
+        "INSERT INTO runs(id, task, status, created_at, final_message_id)"
+        " VALUES (?,?,?,?,?)",
+        ("oldrun", "legacy run", "completed", T0.isoformat(), "m1"),
+    )
+    conn.execute(
+        "INSERT INTO messages(id, run_id, from_agent, type, content, created_at)"
+        " VALUES (?,?,?,?,?,?)",
+        ("m1", "oldrun", "manager", "synthesis", "legacy answer", T0.isoformat()),
+    )
+    conn.commit()
+    conn.close()
+
+    store = RunStore(path)  # triggers v1 -> v2
+    conn = sqlite3.connect(path)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(messages)")}
+    conn.close()
+    assert {"retries", "verification_json", "accountability_json"} <= columns
+
+    # defaults on legacy rows: no retries, no reports
+    loaded = store.load_run("oldrun")
+    assert loaded is not None
+    message = loaded.final_message
+    assert message is not None
+    assert message.retries == 0
+    assert message.verification is None
+    assert message.accountability is None
+
+    # re-open is idempotent (user_version already current)
+    RunStore(path)
+
+
+def test_audit_reports_and_retries_round_trip(store: RunStore):
+    """Phase 11: verification/accountability/retries persist byte-for-byte."""
+    from app.schemas import (
+        AccountabilityFlag,
+        AccountabilityFlagKind,
+        AccountabilityReport,
+        AccountabilityStatus,
+        ClaimProvenance,
+        ClaimVerification,
+        ClaimVerdict,
+        Evidence,
+        FlagSeverity,
+        VerificationReport,
+        VerificationStatus,
+    )
+
+    run = RunRecord(
+        id="auditrun", task="audit me", status=RunStatus.RUNNING, created_at=T0,
+    )
+    store.save_run(run)
+    run.started_at = _at(1)
+    store.append_event(RunEvent(
+        seq=1, type=RunEventType.RUN_STARTED, run_id=run.id, ts=_at(1),
+        task=run.task,
+    ))
+
+    verification = VerificationReport(claims=[
+        ClaimVerification(
+            claim_id="c1", verification_status=VerificationStatus.VERIFIED,
+            evidence_checked=["growth_report.txt"],
+            supporting_evidence=[Evidence(source="growth_report.txt", quote="23%")],
+            source_references=["growth_report.txt"],
+            explanation="opened the file",
+            confidence=0.9,
+        ),
+    ])
+    accountability = AccountabilityReport(
+        trace_completeness=True,
+        final_claim_provenance=[
+            ClaimProvenance(claim_id="c1", origin=AgentRole.RESEARCHER,
+                            verdict=ClaimVerdict.SUPPORTED, evidence_count=1),
+        ],
+        flags=[
+            AccountabilityFlag(
+                kind=AccountabilityFlagKind.RETRY_ACTIVITY,
+                severity=FlagSeverity.INFO, refs=["1"],
+                explanation="one structured retry",
+            ),
+        ],
+        overall_status=AccountabilityStatus.WARNINGS,
+        summary="clean except one retry",
+    )
+
+    verify = StepRecord(
+        index=1, kind=StepKind.VERIFY, agent=AgentRole.VERIFIER,
+        status=StepStatus.RUNNING, started_at=_at(2),
+    )
+    run.steps.append(verify)
+    store.append_event(RunEvent(
+        seq=2, type=RunEventType.STEP_STARTED, run_id=run.id, ts=_at(2),
+        step=1, kind=StepKind.VERIFY, agent=AgentRole.VERIFIER,
+    ))
+    verify.status = StepStatus.COMPLETED
+    verify.duration_ms = 5.0
+    verify.message = _msg(
+        from_agent=AgentRole.VERIFIER, type=MessageType.VERIFICATION,
+        content="verified", verification=verification, retries=1,
+    )
+    store.append_event(RunEvent(
+        seq=3, type=RunEventType.STEP_COMPLETED, run_id=run.id, ts=_at(3),
+        step=1, kind=StepKind.VERIFY, agent=AgentRole.VERIFIER,
+        duration_ms=5.0, message=verify.message,
+    ))
+
+    audit = StepRecord(
+        index=2, kind=StepKind.AUDIT, agent=AgentRole.ACCOUNTABILITY,
+        status=StepStatus.RUNNING, started_at=_at(4),
+    )
+    run.steps.append(audit)
+    store.append_event(RunEvent(
+        seq=4, type=RunEventType.STEP_STARTED, run_id=run.id, ts=_at(4),
+        step=2, kind=StepKind.AUDIT, agent=AgentRole.ACCOUNTABILITY,
+    ))
+    audit.status = StepStatus.COMPLETED
+    audit.duration_ms = 4.0
+    audit.message = _msg(
+        from_agent=AgentRole.ACCOUNTABILITY, type=MessageType.ACCOUNTABILITY,
+        content="audit", accountability=accountability,
+    )
+    store.append_event(RunEvent(
+        seq=5, type=RunEventType.STEP_COMPLETED, run_id=run.id, ts=_at(5),
+        step=2, kind=StepKind.AUDIT, agent=AgentRole.ACCOUNTABILITY,
+        duration_ms=4.0, message=audit.message,
+    ))
+
+    loaded = RunStore(store._path).load_run("auditrun")
+    assert loaded is not None
+    loaded_verify = loaded.steps[0].message
+    assert loaded_verify is not None
+    assert loaded_verify.verification == verification
+    assert loaded_verify.retries == 1
+    loaded_audit = loaded.steps[1].message
+    assert loaded_audit is not None
+    assert loaded_audit.accountability == accountability
+    assert loaded_audit.retries == 0
 
 
 def test_reinit_is_idempotent(tmp_path: Path):
@@ -324,12 +476,75 @@ def _drive_full_run(store: RunStore, run_id: str = "run1") -> RunRecord:
     run.rounds.append(round2)
     store.record_round(run_id, round2)
 
+    # --- VERIFY (Phase 11): report + retries persist ------------------------
+    verify = StepRecord(index=8, kind=StepKind.VERIFY,
+                         agent=AgentRole.VERIFIER, status=StepStatus.RUNNING,
+                         started_at=_at(14))
+    run.steps.append(verify)
+    emit(RunEvent(seq=15, type=RunEventType.STEP_STARTED, run_id=run_id,
+                  ts=_at(14), step=8, kind=StepKind.VERIFY,
+                  agent=AgentRole.VERIFIER))
+    verify.status = StepStatus.COMPLETED
+    verify.duration_ms = 750.0
+    verify.message = _msg(
+        from_agent=AgentRole.VERIFIER, type=MessageType.VERIFICATION,
+        content="checked the audit",
+        verification=VerificationReport(claims=[
+            ClaimVerification(
+                claim_id="c1",
+                verification_status=VerificationStatus.VERIFIED,
+                evidence_checked=["audit.pdf"],
+                supporting_evidence=[Evidence(source="audit.pdf",
+                                              quote="23%")],
+                contradicting_evidence=[],
+                source_references=["audit.pdf"],
+                explanation="the audit states 23%",
+                confidence=0.9,
+            ),
+        ]),
+        retries=1,
+    )
+    emit(RunEvent(seq=16, type=RunEventType.STEP_COMPLETED, run_id=run_id,
+                  ts=_at(15), step=8, kind=StepKind.VERIFY,
+                  agent=AgentRole.VERIFIER, duration_ms=750.0,
+                  message=verify.message))
+
+    # --- AUDIT (Phase 11): enforced report persists -------------------------
+    audit = StepRecord(index=9, kind=StepKind.AUDIT,
+                        agent=AgentRole.ACCOUNTABILITY,
+                        status=StepStatus.RUNNING, started_at=_at(16))
+    run.steps.append(audit)
+    emit(RunEvent(seq=17, type=RunEventType.STEP_STARTED, run_id=run_id,
+                  ts=_at(16), step=9, kind=StepKind.AUDIT,
+                  agent=AgentRole.ACCOUNTABILITY))
+    audit.status = StepStatus.COMPLETED
+    audit.duration_ms = 300.0
+    audit.message = _msg(
+        from_agent=AgentRole.ACCOUNTABILITY, type=MessageType.ACCOUNTABILITY,
+        content="trace audit",
+        accountability=AccountabilityReport(
+            trace_completeness=True,
+            final_claim_provenance=[
+                ClaimProvenance(claim_id="c1", origin=AgentRole.RESEARCHER,
+                                verdict=ClaimVerdict.SUPPORTED,
+                                evidence_count=1),
+            ],
+            flags=[],
+            overall_status=AccountabilityStatus.CLEAN,
+            summary="no process gaps found",
+        ),
+    )
+    emit(RunEvent(seq=18, type=RunEventType.STEP_COMPLETED, run_id=run_id,
+                  ts=_at(17), step=9, kind=StepKind.AUDIT,
+                  agent=AgentRole.ACCOUNTABILITY, duration_ms=300.0,
+                  message=audit.message))
+
     # --- RUN_COMPLETED ------------------------------------------------------
     run.final_message = synth.message
     run.status = RunStatus.COMPLETED
-    run.finished_at = _at(15)
-    emit(RunEvent(seq=15, type=RunEventType.RUN_COMPLETED, run_id=run_id,
-                  ts=_at(15), message=run.final_message, duration_ms=15000.0))
+    run.finished_at = _at(18)
+    emit(RunEvent(seq=19, type=RunEventType.RUN_COMPLETED, run_id=run_id,
+                  ts=_at(18), message=run.final_message, duration_ms=15000.0))
     return run
 
 
@@ -388,11 +603,29 @@ def test_round_trip_failed_run(store: RunStore):
 def test_empty_claims_list_survives_vs_none(store: RunStore):
     run = _drive_full_run(store, "nulls")
     loaded = store.load_run("nulls")
-    synth_msg = loaded.steps[-1].message
+    synth_msg = next(
+        step.message for step in loaded.steps if step.kind is StepKind.SYNTHESIZE
+    )
     assert synth_msg.claims == []            # preserved as empty list
     assert synth_msg.verdicts is None        # preserved as None
     assert loaded.steps[0].message.verdicts is None
     assert loaded.steps[1].message.claims is not None
+
+
+def test_audit_reports_and_retries_survive_full_trace(store: RunStore):
+    """The realistic full trace round-trips both Phase 11 reports (§11.7)."""
+    run = _drive_full_run(store, "audited")
+    loaded = store.load_run("audited")
+    verify = next(s for s in loaded.steps if s.kind is StepKind.VERIFY)
+    assert verify.message is not None
+    assert verify.message.verification == run.steps[-2].message.verification
+    assert verify.message.retries == 1
+    audit = next(s for s in loaded.steps if s.kind is StepKind.AUDIT)
+    assert audit.message is not None
+    assert audit.message.accountability == run.steps[-1].message.accountability
+    assert audit.message.accountability.overall_status is (
+        AccountabilityStatus.CLEAN
+    )
 
 
 def test_shared_final_and_step_message_stored_once(store: RunStore):
@@ -401,8 +634,9 @@ def test_shared_final_and_step_message_stored_once(store: RunStore):
     count = conn.execute("SELECT COUNT(*) FROM messages WHERE run_id='run1'")\
         .fetchone()[0]
     conn.close()
-    # 7 steps, of which the final message is the synthesize message again
-    assert count == 6
+    # 9 steps, of which one is message-less (skipped decide) and the final
+    # message is the synthesize message again -> 8 distinct rows
+    assert count == 8
 
 
 # ---------------------------------------------------------------- event reads
@@ -411,9 +645,9 @@ def test_shared_final_and_step_message_stored_once(store: RunStore):
 def test_load_events_since(store: RunStore):
     _drive_full_run(store)
     all_events = store.load_events("run1")
-    assert [e.seq for e in all_events] == list(range(1, 16))
-    tail = store.load_events("run1", since_seq=13)
-    assert [e.seq for e in tail] == [14, 15]
+    assert [e.seq for e in all_events] == list(range(1, 20))
+    tail = store.load_events("run1", since_seq=18)
+    assert [e.seq for e in tail] == [19]
     assert tail[-1].type is RunEventType.RUN_COMPLETED
     assert tail[-1].message.content == "final answer"
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
 
-from app.agents import ideator, manager, researcher, skeptic
+from app.agents import accountability, ideator, manager, researcher, skeptic, verifier
 from app.agents.base import Agent, AgentConfig
 from app.agents.errors import AgentNotRegisteredError
 from app.llm.base import LLMProvider
@@ -28,6 +28,8 @@ DEFAULT_AGENT_CONFIGS: tuple[AgentConfig, ...] = (
     researcher.CONFIG,
     ideator.CONFIG,
     skeptic.CONFIG,
+    verifier.CONFIG,
+    accountability.CONFIG,
 )
 
 

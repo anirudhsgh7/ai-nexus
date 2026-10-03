@@ -132,7 +132,8 @@ async def test_skeptic_verdicts_reference_supplied_claims(live_registry):
 
 
 async def test_registry_default_configs_match_agents(live_registry):
-    assert len(live_registry) == len(DEFAULT_AGENT_CONFIGS) == 4
+    # Phase 11: six default configs (four workers + verifier + accountability)
+    assert len(live_registry) == len(DEFAULT_AGENT_CONFIGS) == 6
     for config in DEFAULT_AGENT_CONFIGS:
         agent = live_registry.get(config.role)
         assert agent.config is config

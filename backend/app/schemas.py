@@ -15,27 +15,38 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from app.llm.base import ToolCall
 
 __all__ = [
+    "AccountabilityFlag",
+    "AccountabilityFlagKind",
+    "AccountabilityReport",
+    "AccountabilityStatus",
     "AgentMessage",
     "AgentRole",
     "Claim",
+    "ClaimProvenance",
     "ClaimStatus",
+    "ClaimVerification",
     "ClaimVerdict",
     "DecisionAction",
     "Evidence",
+    "FlagSeverity",
     "ManagerDecision",
     "MessageType",
     "ToolResult",
+    "VerificationReport",
+    "VerificationStatus",
     "Verdict",
 ]
 
 
 class AgentRole(str, Enum):
-    """The four V1 roles. Future agents (Verifier, Accountability) extend this."""
+    """Agent roles. Phase 11 added the two audit roles (PRD §6.8)."""
 
     MANAGER = "manager"
     RESEARCHER = "researcher"
     IDEATOR = "ideator"
     SKEPTIC = "skeptic"
+    VERIFIER = "verifier"            # Phase 11
+    ACCOUNTABILITY = "accountability"  # Phase 11
 
 
 class MessageType(str, Enum):
@@ -49,6 +60,8 @@ class MessageType(str, Enum):
     SYNTHESIS = "synthesis"
     DECISION = "decision"      # Phase 5: manager routing decisions
     REVISION = "revision"      # Phase 5: iterative worker revision turns
+    VERIFICATION = "verification"    # Phase 11: final-answer audit
+    ACCOUNTABILITY = "accountability"  # Phase 11: trace/process audit
 
 
 class ClaimStatus(str, Enum):
@@ -163,11 +176,136 @@ class ManagerDecision(BaseModel):
         return self
 
 
+class VerificationStatus(str, Enum):
+    """Verifier's four-valued vocabulary (Phase 11 PRD §6.3).
+
+    Deliberately distinct from `ClaimVerdict`: a prior `supported` verdict is
+    context for this audit, never grounds for `VERIFIED`.
+    """
+
+    VERIFIED = "verified"
+    CONTRADICTED = "contradicted"
+    UNVERIFIABLE = "unverifiable"
+    PARTIALLY_VERIFIED = "partially_verified"
+
+
+class ClaimVerification(BaseModel):
+    """The Verifier's evaluation of exactly one final claim."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claim_id: str = Field(min_length=1)
+    verification_status: VerificationStatus
+    evidence_checked: list[str] = Field(default_factory=list)
+    supporting_evidence: list[Evidence] = Field(default_factory=list)
+    contradicting_evidence: list[Evidence] = Field(default_factory=list)
+    source_references: list[str] = Field(default_factory=list)
+    explanation: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="after")
+    def _explanation_not_blank(self) -> "ClaimVerification":
+        if not self.explanation.strip():
+            raise ValueError("explanation must be non-empty")
+        return self
+
+
+class VerificationReport(BaseModel):
+    """One entry per supplied final claim (coverage enforced by code)."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claims: list[ClaimVerification] = Field(default_factory=list)
+
+
+class AccountabilityFlagKind(str, Enum):
+    """Flag families the process audit can raise (PRD §6.3)."""
+
+    TRACE_INCOMPLETENESS = "trace_incompleteness"
+    UNSUPPORTED_FINAL_CLAIM = "unsupported_final_claim"
+    UNRESOLVED_CLAIM_SUPPRESSED = "unresolved_claim_suppressed"
+    DECISION_INCONSISTENCY = "decision_inconsistency"
+    EVIDENCE_PROVENANCE_GAP = "evidence_provenance_gap"
+    TOOL_USE_INCONSISTENCY = "tool_use_inconsistency"
+    PEER_PROSE_EXPOSURE = "peer_prose_exposure"  # only if detectable
+    PREMATURE_STOP = "premature_stop"
+    CONFIDENCE_EVIDENCE_MISMATCH = "confidence_evidence_mismatch"
+    RETRY_ACTIVITY = "retry_activity"
+
+
+class FlagSeverity(str, Enum):
+    """Severity ladder; `overall_status` derives from the merged flags."""
+
+    INFO = "info"
+    WARNING = "warning"
+    VIOLATION = "violation"
+
+
+class AccountabilityFlag(BaseModel):
+    """One process/provenance finding. Mechanical entries are code-canonical
+    (merged by `enforce_accountability`); semantic entries are the model's."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    kind: AccountabilityFlagKind
+    severity: FlagSeverity
+    refs: list[str] = Field(default_factory=list)
+    explanation: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _explanation_not_blank(self) -> "AccountabilityFlag":
+        if not self.explanation.strip():
+            raise ValueError("explanation must be non-empty")
+        return self
+
+
+class AccountabilityStatus(str, Enum):
+    """Aggregate audit outcome (derived, never asserted against the flags)."""
+
+    CLEAN = "clean"
+    WARNINGS = "warnings"
+    VIOLATIONS = "violations"
+
+
+class ClaimProvenance(BaseModel):
+    """Where a final claim came from and how it fared."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    claim_id: str = Field(min_length=1)
+    origin: AgentRole
+    verdict: ClaimVerdict | None = None
+    evidence_count: int = Field(default=0, ge=0)
+
+
+class AccountabilityReport(BaseModel):
+    """Trace/provenance/process audit (Phase 11 PRD §6.3) — never a quality
+    judgment. The mechanical fields are overwritten with code-computed facts
+    by `enforce_accountability` before anything is persisted."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    trace_completeness: bool
+    final_claim_provenance: list[ClaimProvenance] = Field(default_factory=list)
+    flags: list[AccountabilityFlag] = Field(default_factory=list)
+    overall_status: AccountabilityStatus
+    summary: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _summary_not_blank(self) -> "AccountabilityReport":
+        if not self.summary.strip():
+            raise ValueError("summary must be non-empty")
+        return self
+
+
 class AgentMessage(BaseModel):
     """The unified agent-to-agent message envelope.
 
-    Exactly one of `claims`, `verdicts`, `decision` is non-None on a structured
-    message. `confidence` is reserved: per-claim confidence is authoritative.
+    Exactly one of `claims`, `verdicts`, `decision`, `verification`,
+    `accountability` is non-None on a structured message. `confidence` is
+    reserved: per-claim confidence is authoritative. `retries` records the
+    structured-output correction retries of this call (Phase 11 makes retry
+    activity auditable).
     """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -180,9 +318,12 @@ class AgentMessage(BaseModel):
     claims: list[Claim] | None = None
     verdicts: list[Verdict] | None = None
     decision: ManagerDecision | None = None
+    verification: VerificationReport | None = None
+    accountability: AccountabilityReport | None = None
     confidence: float | None = Field(default=None, ge=0.0, le=1.0)
     tool_calls: list[ToolCall] | None = None
     tool_results: list[ToolResult] | None = None
+    retries: int = Field(default=0, ge=0)
     round: int | None = Field(default=None, ge=1)
     created_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 

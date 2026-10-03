@@ -433,3 +433,85 @@ async def test_sse_keepalive_emitted_before_terminal(monkeypatch):
 def test_health_endpoint_still_works_after_wiring(api):
     client, _ = api
     assert client.get("/api/health").status_code in {200, 503}
+
+
+def test_run_payload_audit_messages():
+    """Phase 11 §6.10: verify/audit messages ride the run payload."""
+    from datetime import UTC, datetime
+
+    from app.api.runs import _run_payload
+    from app.schemas import (
+        AccountabilityFlag,
+        AccountabilityFlagKind,
+        AccountabilityReport,
+        AccountabilityStatus,
+        ClaimVerification,
+        ClaimProvenance,
+        Evidence,
+        FlagSeverity,
+        VerificationReport,
+        VerificationStatus,
+    )
+
+    run = appless_run()
+    # absent audits -> null
+    empty = _run_payload(run)
+    assert empty["verification"] is None
+    assert empty["accountability"] is None
+
+    verify_message = AgentMessage(
+        from_agent=AgentRole.VERIFIER, type=MessageType.VERIFICATION,
+        content="verified",
+        verification=VerificationReport(claims=[
+            ClaimVerification(
+                claim_id="c1",
+                verification_status=VerificationStatus.VERIFIED,
+                evidence_checked=["doc"],
+                supporting_evidence=[Evidence(source="doc", quote="23%")],
+                source_references=["doc"],
+                explanation="checked",
+                confidence=0.9,
+            ),
+        ]),
+        retries=1,
+    )
+    audit_message = AgentMessage(
+        from_agent=AgentRole.ACCOUNTABILITY, type=MessageType.ACCOUNTABILITY,
+        content="audit",
+        accountability=AccountabilityReport(
+            trace_completeness=True,
+            final_claim_provenance=[
+                ClaimProvenance(claim_id="c1", origin=AgentRole.RESEARCHER),
+            ],
+            flags=[
+                AccountabilityFlag(
+                    kind=AccountabilityFlagKind.RETRY_ACTIVITY,
+                    severity=FlagSeverity.INFO, refs=["4"],
+                    explanation="one retry",
+                ),
+            ],
+            overall_status=AccountabilityStatus.WARNINGS,
+            summary="one retry observed",
+        ),
+    )
+    run.steps.extend([
+        StepRecord(
+            index=1, kind=StepKind.VERIFY, agent=AgentRole.VERIFIER,
+            status=StepStatus.COMPLETED, started_at=datetime.now(UTC),
+            duration_ms=5.0, message=verify_message,
+        ),
+        StepRecord(
+            index=2, kind=StepKind.AUDIT, agent=AgentRole.ACCOUNTABILITY,
+            status=StepStatus.COMPLETED, started_at=datetime.now(UTC),
+            duration_ms=4.0, message=audit_message,
+        ),
+    ])
+    payload = _run_payload(run)
+    assert payload["verification"]["from_agent"] == "verifier"
+    assert payload["verification"]["retries"] == 1
+    report = payload["verification"]["verification"]
+    assert report["claims"][0]["verification_status"] == "verified"
+    assert payload["accountability"]["accountability"]["overall_status"] == "warnings"
+    assert payload["accountability"]["accountability"]["flags"][0]["kind"] == (
+        "retry_activity"
+    )

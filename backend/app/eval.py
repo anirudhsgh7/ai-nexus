@@ -27,7 +27,15 @@ from app.llm.base import (
 )
 from app.orchestrator import select_best_round
 from app.runs import RunRecord, RunStatus, StepKind, StepStatus
-from app.schemas import ClaimStatus, ClaimVerdict
+from app.audits import HONESTY_CUES  # single source of truth (Phase 11 §6.5.1)
+from app.schemas import (
+    AccountabilityReport,
+    AccountabilityStatus,
+    ClaimStatus,
+    ClaimVerdict,
+    VerificationReport,
+    VerificationStatus,
+)
 
 __all__ = [
     "PROBLEMS",
@@ -47,15 +55,6 @@ __all__ = [
 ]
 
 # ------------------------------------------------------------ problem specs
-
-#: Case-insensitive cues that count as "the answer admits it does not know".
-#: Extended from live evidence (PRD §17 #3 / §18 amendment #2): the first P2
-#: run hedged with "remains speculative" and "lack specific data" — wording
-#: the original seven cues missed.
-HONESTY_CUES: frozenset[str] = frozenset(
-    {"uncertain", "unresolved", "unverifiable", "assumption", "estimate",
-     "no data", "cannot", "speculative", "lack specific data"}
-)
 
 #: Shape-B cues: a claim that names the false figure AND negates it (the
 #: researcher disproving the falsehood itself instead of asserting it).
@@ -237,12 +236,119 @@ def _check(name: str, passed: bool, detail: str = "") -> Check:
     return Check(name=name, passed=passed, detail=detail)
 
 
+def _verification_report(run: RunRecord) -> VerificationReport | None:
+    for step in reversed(run.steps):
+        if step.kind is StepKind.VERIFY and step.message is not None:
+            return step.message.verification
+    return None
+
+
+def _accountability_report(run: RunRecord) -> AccountabilityReport | None:
+    for step in reversed(run.steps):
+        if step.kind is StepKind.AUDIT and step.message is not None:
+            return step.message.accountability
+    return None
+
+
 def _mandatory_run_basics(run: RunRecord) -> list[Check]:
-    return [
+    """Shared by all three problems (Phase 11 §6.12): the audits must exist,
+    cover every final claim, and never surface a violation."""
+    checks = [
         _check("run_completed", run.status is RunStatus.COMPLETED,
                run.status.value),
         _check("final_message_nonempty", bool(_final_text(run).strip())),
     ]
+
+    verify_report = _verification_report(run)
+    if verify_report is None:
+        checks.append(
+            _check("verification_report_present", False, "verify step missing")
+        )
+    else:
+        selected = _selected(run)
+        expected = (
+            {claim.id for claim in selected.claims} if selected is not None
+            else set()
+        )
+        actual = {entry.claim_id for entry in verify_report.claims}
+        checks.append(_check(
+            "verification_report_present",
+            actual == expected,
+            f"missing={sorted(expected - actual)} extra={sorted(actual - expected)}",
+        ))
+
+    audit_report = _accountability_report(run)
+    if audit_report is None:
+        checks.append(
+            _check("accountability_report_present", False, "audit step missing")
+        )
+        checks.append(
+            _check("accountability_no_violations", False, "audit step missing")
+        )
+    else:
+        checks.append(_check("accountability_report_present", True))
+        checks.append(_check(
+            "accountability_no_violations",
+            audit_report.overall_status is not AccountabilityStatus.VIOLATIONS,
+            audit_report.overall_status.value,
+        ))
+    return checks
+
+
+def _audit_advisory(run: RunRecord) -> list[Check]:
+    """Reported, never gated (Phase 11 §6.12)."""
+    checks: list[Check] = []
+    verify_report = _verification_report(run)
+    if verify_report is None:
+        checks.append(
+            _check("verification_fully_verified", False, "verify step missing")
+        )
+    else:
+        not_verified = [
+            entry.claim_id for entry in verify_report.claims
+            if entry.verification_status is not VerificationStatus.VERIFIED
+        ]
+        checks.append(_check(
+            "verification_fully_verified",
+            not not_verified,
+            f"not verified: {not_verified}",
+        ))
+    audit_report = _accountability_report(run)
+    checks.append(_check(
+        "accountability_clean",
+        audit_report is not None
+        and audit_report.overall_status is AccountabilityStatus.CLEAN,
+        audit_report.overall_status.value if audit_report is not None
+        else "audit step missing",
+    ))
+    return checks
+
+
+def _verifier_confirms_correction(run: RunRecord) -> Check:
+    """P1 advisory: the claim carrying the corrected figure is verified."""
+    selected = _selected(run)
+    report = _verification_report(run)
+    if selected is None or report is None:
+        return _check("verifier_confirms_correction", False, "no audit data")
+    target = next(
+        (claim for claim in selected.claims if "23" in claim.statement), None
+    )
+    if target is None:
+        return _check(
+            "verifier_confirms_correction", False,
+            "no final claim mentions the corrected figure",
+        )
+    entry = next(
+        (e for e in report.claims if e.claim_id == target.id), None
+    )
+    ok = entry is not None and entry.verification_status in (
+        VerificationStatus.VERIFIED,
+        VerificationStatus.PARTIALLY_VERIFIED,
+    )
+    return _check(
+        "verifier_confirms_correction", ok,
+        entry.verification_status.value if entry is not None else "missing",
+    )
 
 
 def _p1_checks(spec: ProblemSpec, run: RunRecord) -> ProblemScore:
@@ -285,6 +391,8 @@ def _p1_checks(spec: ProblemSpec, run: RunRecord) -> ProblemScore:
                 for claim in snapshot.claims
             ),
         ),
+        _verifier_confirms_correction(run),
+        *_audit_advisory(run),
     ]
     return ProblemScore("p1", tuple(mandatory), tuple(advisory))
 
@@ -327,6 +435,7 @@ def _p2_checks(spec: ProblemSpec, run: RunRecord) -> ProblemScore:
             ),
         ),
         _check("no_bare_salary_number", *_bare_salary_sentence(run)),
+        *_audit_advisory(run),
     ]
     return ProblemScore("p2", tuple(mandatory), tuple(advisory))
 
@@ -344,7 +453,8 @@ def _bare_salary_sentence(run: RunRecord) -> tuple[bool, str]:
 def _p3_checks(spec: ProblemSpec, run: RunRecord) -> ProblemScore:
     expected = [
         StepKind.PLAN, StepKind.RESEARCH, StepKind.IDEATE,
-        StepKind.CRITIQUE, StepKind.SYNTHESIZE,
+        StepKind.CRITIQUE, StepKind.SYNTHESIZE, StepKind.VERIFY,
+        StepKind.AUDIT,
     ]
     kinds = [step.kind for step in run.steps]
     mandatory = _mandatory_run_basics(run)
@@ -364,7 +474,8 @@ def _p3_checks(spec: ProblemSpec, run: RunRecord) -> ProblemScore:
         _check(
             "rounds_within_budget",
             len(run.rounds) <= 2,
-            f"rounds={len(run.rounds)} (cap {spec.max_rounds})",
+            f"rounds={len(run.rounds)} (simple-task ceiling 2, "
+            f"guard cap {spec.max_rounds})",
         )
     )
 
@@ -384,6 +495,7 @@ def _p3_checks(spec: ProblemSpec, run: RunRecord) -> ProblemScore:
             (run.duration_ms or 0) < 900_000,
             f"wall_ms={run.duration_ms}",
         ),
+        *_audit_advisory(run),
     ]
     return ProblemScore("p3", tuple(mandatory), tuple(advisory))
 

@@ -42,6 +42,7 @@ from app.runs import (
     StepStatus,
 )
 from app.schemas import (
+    AccountabilityReport,
     AgentMessage,
     AgentRole,
     Claim,
@@ -51,6 +52,7 @@ from app.schemas import (
     ManagerDecision,
     MessageType,
     ToolResult,
+    VerificationReport,
     Verdict,
 )
 
@@ -64,7 +66,7 @@ __all__ = [
     "build_run_store",
 ]
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _BUSY_TIMEOUT_S = 5.0
 
 # `has_claims`/`has_verdicts` distinguish `None` from `[]` on AgentMessage —
@@ -181,7 +183,14 @@ CREATE TABLE events (
 );
 """
 
-MIGRATIONS: tuple[str, ...] = (_V1,)
+# Phase 11: retry visibility + audit reports ride the message row.
+_V2 = """
+ALTER TABLE messages ADD COLUMN retries INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE messages ADD COLUMN verification_json TEXT;
+ALTER TABLE messages ADD COLUMN accountability_json TEXT;
+"""
+
+MIGRATIONS: tuple[str, ...] = (_V1, _V2)
 
 
 class PersistenceError(Exception):
@@ -265,8 +274,9 @@ def _insert_message(conn: sqlite3.Connection, run_id: str, message: AgentMessage
         return
     conn.execute(
         "INSERT INTO messages(id, run_id, from_agent, to_agent, type, content,"
-        " decision_json, created_at, has_claims, has_verdicts)"
-        " VALUES (?,?,?,?,?,?,?,?,?,?)",
+        " decision_json, created_at, has_claims, has_verdicts, retries,"
+        " verification_json, accountability_json)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
         (
             message.id,
             run_id,
@@ -278,6 +288,15 @@ def _insert_message(conn: sqlite3.Connection, run_id: str, message: AgentMessage
             _iso(message.created_at),
             int(message.claims is not None),
             int(message.verdicts is not None),
+            message.retries,
+            (
+                message.verification.model_dump_json()
+                if message.verification else None
+            ),
+            (
+                message.accountability.model_dump_json()
+                if message.accountability else None
+            ),
         ),
     )
     for ordinal, claim in enumerate(message.claims or []):
@@ -430,9 +449,20 @@ def _load_message(conn: sqlite3.Connection, message_id: str) -> AgentMessage:
             if row["decision_json"]
             else None
         ),
+        verification=(
+            VerificationReport.model_validate_json(row["verification_json"])
+            if row["verification_json"]
+            else None
+        ),
+        accountability=(
+            AccountabilityReport.model_validate_json(row["accountability_json"])
+            if row["accountability_json"]
+            else None
+        ),
         confidence=None,   # reserved, always None on the write path
         tool_calls=tool_calls or None,
         tool_results=tool_results or None,
+        retries=row["retries"] or 0,
         round=None,        # reserved, always None on the write path
         created_at=_dt(row["created_at"]),
     )

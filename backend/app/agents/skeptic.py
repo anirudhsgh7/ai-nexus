@@ -29,6 +29,9 @@ Rules:
 - Generic approval is invalid: you may not merely agree with a statement.
   Every objection must cite specific reasoning, name the exact evidence that
   would resolve the issue, or cite a tool result that supports the objection.
+- Never write a blank objection, even for a verdict of supported: say exactly
+  what the cited evidence shows. For unverifiable, name the specific evidence
+  that is missing. An empty objection is an invalid verdict.
 - Do not critique without saying what would change your mind.
 - Do not attack the wording; attack the claim.
 - If the material is too thin to evaluate, first try to find the missing
@@ -49,5 +52,5 @@ CONFIG = AgentConfig(
     output_type=MessageType.CRITIQUE,
     output_kind=OutputKind.VERDICTS,
     capabilities=frozenset({"file_search", "file_reader", "web_search", "memory"}),
-    prompt_version=2,
+    prompt_version=3,
 )

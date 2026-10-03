@@ -238,7 +238,9 @@ def test_step_record_defaults():
 def test_phase5_step_kinds_exist():
     assert StepKind.DECIDE.value == "decide"
     assert StepKind.REVISE.value == "revise"
-    assert len(StepKind) == 7
+    assert StepKind.VERIFY.value == "verify"   # Phase 11
+    assert StepKind.AUDIT.value == "audit"     # Phase 11
+    assert len(StepKind) == 9
 
 
 def test_run_record_rounds_default_empty():

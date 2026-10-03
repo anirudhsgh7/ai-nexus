@@ -24,8 +24,10 @@ from app.agents.structured import (
     StructuredResult,
     correction_message,
     directive_for,
+    parse_accountability,
     parse_claims,
     parse_decision,
+    parse_verification,
     parse_verdicts,
     schema_for,
 )
@@ -35,6 +37,7 @@ from app.agents.tool_loop import (
     ToolLoopOutcome,
     gather_with_tools,
 )
+from app.audits import validate_verification
 from app.claims import render_claims, validate_claims, validate_verdicts
 from app.config import get_settings
 from app.llm.base import ChatMessage, ChatRole, LLMError, LLMProvider, TokenUsage
@@ -250,7 +253,10 @@ class Agent:
                         ChatMessage(role=ChatRole.USER, content=STRUCTURED_NUDGE),
                     ]
                     result, parsed, retries = await self._structured_attempts(
-                        phase_b_messages, kind, input_claims, effective_max_tokens
+                        phase_b_messages, kind, input_claims,
+                        effective_max_tokens,
+                        tool_calls_executed=len(outcome.calls),
+                        tools_available=True,
                     )
                     usage = result.usage
             elif kind is OutputKind.PLAIN:
@@ -277,11 +283,12 @@ class Agent:
                 error_type="StructuredOutputError", message=exc.last_error,
             )
             raise
-
         content = parsed.content if parsed is not None else plain_content
         out_claims = parsed.claims if parsed is not None else None
         out_verdicts = parsed.verdicts if parsed is not None else None
         out_decision = parsed.decision if parsed is not None else None
+        out_verification = parsed.verification if parsed is not None else None
+        out_accountability = parsed.accountability if parsed is not None else None
         if outcome is not None:
             tool_calls = outcome.calls or None
             tool_results = outcome.outcomes or None
@@ -294,6 +301,7 @@ class Agent:
         # Empty rule: for PLAIN, tool activity counts as output (a tool-using
         # agent that produced only calls still delivered something). For
         # structured kinds only structured fields count — activity is not output.
+        # A report (even with an empty claim list) is structured output.
         if kind is OutputKind.PLAIN:
             has_output = bool(content.strip()) or bool(tool_calls)
         else:
@@ -302,10 +310,13 @@ class Agent:
                 or bool(out_claims)
                 or bool(out_verdicts)
                 or out_decision is not None
+                or out_verification is not None
+                or out_accountability is not None
             )
         if not has_output:
             log.agent_run_error(
-                logger, agent=cfg.role.value,
+                logger,
+                agent=cfg.role.value,
                 error_type="EmptyAgentResponseError",
                 message="no content, no tool calls",
             )
@@ -320,9 +331,12 @@ class Agent:
             claims=out_claims,
             verdicts=out_verdicts,
             decision=out_decision,
+            verification=out_verification,
+            accountability=out_accountability,
             confidence=None,
             tool_calls=tool_calls,
             tool_results=tool_results,
+            retries=retries,
             round=None,
             created_at=datetime.now(UTC),
         )
@@ -363,8 +377,15 @@ class Agent:
         kind: OutputKind,
         input_claims: list[Claim],
         max_tokens: int | None,
+        *,
+        tool_calls_executed: int = 0,
+        tools_available: bool = False,
     ) -> tuple:
-        """One grammar-constrained call + at most one corrected retry (PRD §6.5.2)."""
+        """One grammar-constrained call + at most one corrected retry (PRD §6.5.2).
+
+        `tool_calls_executed`/`tools_available` feed the Verifier's independent-
+        check rule (Phase 11 §6.5.2); other kinds ignore them.
+        """
         cfg = self._config
         schema = schema_for(kind)
         current = list(messages)
@@ -386,6 +407,19 @@ class Agent:
                 elif kind is OutputKind.VERDICTS:
                     parsed = parse_verdicts(result.content)
                     problems = validate_verdicts(input_claims, parsed.verdicts or [])
+                elif kind is OutputKind.VERIFICATION:
+                    parsed = parse_verification(result.content)
+                    problems = validate_verification(
+                        parsed.verification,
+                        input_claims,
+                        tool_calls_executed,
+                        tools_available,
+                    )
+                elif kind is OutputKind.ACCOUNTABILITY:
+                    # pydantic validators run inside the parser; the mechanical
+                    # facts are enforced by the orchestrator (PRD §6.5.4)
+                    parsed = parse_accountability(result.content)
+                    problems = []
                 else:  # DECISION: coherence enforced by ManagerDecision validators
                     parsed = parse_decision(result.content)
                     problems = []

@@ -59,18 +59,18 @@ function stepAt(view: RunView, index: number): StepEntry {
 describe("golden iterative trace", () => {
   const view = foldAll(events);
 
-  it("folds the full 20-event log into a completed run with 9 steps", () => {
+  it("folds the full 24-event log into a completed run with 11 steps", () => {
     expect(view.status).toBe("completed");
-    expect(view.steps).toHaveLength(9);
+    expect(view.steps).toHaveLength(11);
     expect(view.steps.map((step) => step.kind)).toEqual([
       "plan", "research", "ideate", "critique", "decide",
-      "revise", "critique", "decide", "synthesize",
+      "revise", "critique", "decide", "synthesize", "verify", "audit",
     ]);
     expect(view.steps.map((step) => step.status)).toEqual(
-      Array.from({ length: 9 }, () => "completed"),
+      Array.from({ length: 11 }, () => "completed"),
     );
     expect(view.steps.map((step) => step.round)).toEqual([
-      null, 1, 1, 1, 1, 2, 2, 2, null,
+      null, 1, 1, 1, 1, 2, 2, 2, null, null, null,
     ]);
     expect(view.lastSeq).toBe(events.length);
     expect(view.startedAt).not.toBeNull();
@@ -79,15 +79,17 @@ describe("golden iterative trace", () => {
   });
 
   it("keeps the final message and run task", () => {
-    expect(view.finalMessage?.content).toBe("Final answer.");
-    expect(view.task).toBe("Should we build X?");
+    expect(view.finalMessage?.content).toContain(
+      "Recommendation: adopt AI tooling",
+    );
+    expect(view.task).toBe("Fixture capture: verify the 40% growth claim.");
   });
 
   it("preserves structured message payloads verbatim", () => {
     const research = stepAt(view, 1);
-    expect(research.message?.claims).toHaveLength(2);
+    expect(research.message?.claims).toHaveLength(3);
     const critique = stepAt(view, 3);
-    expect(critique.message?.verdicts).toHaveLength(3);
+    expect(critique.message?.verdicts).toHaveLength(5);
     expect(critique.message?.claims).toBeNull();
     const decide = stepAt(view, 4);
     expect(decide.message?.decision?.action).toBe("call_agent");
@@ -107,13 +109,14 @@ describe("golden iterative trace", () => {
     expect(groups.map((group) => group.label)).toEqual([
       "Setup", "Round 1", "Round 2", "Wrap-up",
     ]);
-    expect(groups.map((group) => group.steps.length)).toEqual([1, 4, 3, 1]);
+    expect(groups.map((group) => group.steps.length)).toEqual([1, 4, 3, 3]);
   });
 
   it("summarizes a step with counts and duration", () => {
     const entry = stepAt(view, 1);
+    // the regenerated fixture's research step carries one executed tool call
     expect(stepSummary(entry)).toBe(
-      `#2 · Researcher · research · r1 · 2 claims · ${formatDuration(entry.durationMs)}`,
+      `#2 · Researcher · research · r1 · 1 tools · 3 claims · ${formatDuration(entry.durationMs)}`,
     );
   });
 });

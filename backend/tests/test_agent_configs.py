@@ -1,8 +1,8 @@
-"""Role config lint (PRD §6.4): exactly four, table-locked, directive keywords."""
+"""Role config lint (PRD §6.4/Phase 11 §6.8): six roles, table-locked, directive keywords."""
 
 import pytest
 
-from app.agents import ideator, manager, researcher, skeptic
+from app.agents import accountability, ideator, manager, researcher, skeptic, verifier
 from app.agents.base import MAX_INSTRUCTION_CHARS
 from app.agents.structured import OutputKind
 from app.schemas import AgentRole, MessageType
@@ -12,6 +12,8 @@ CONFIGS = {
     AgentRole.RESEARCHER: researcher.CONFIG,
     AgentRole.IDEATOR: ideator.CONFIG,
     AgentRole.SKEPTIC: skeptic.CONFIG,
+    AgentRole.VERIFIER: verifier.CONFIG,
+    AgentRole.ACCOUNTABILITY: accountability.CONFIG,
 }
 
 # Case-insensitive substring sets; any listed variant must appear.
@@ -20,6 +22,8 @@ DIRECTIVE_KEYWORDS = {
     AgentRole.RESEARCHER: ["evidence", "assumption", "perspectiv", "uncertain"],
     AgentRole.IDEATOR: ["alternative", "assumption", "reason", "converg"],
     AgentRole.SKEPTIC: ["challenge", "unsupported", "contradict", "missing", "independ", "disprov"],
+    AgentRole.VERIFIER: ["verify", "independent", "source", "contradict", "evidence"],
+    AgentRole.ACCOUNTABILITY: ["trace", "provenance", "flag", "unresolved", "decision"],
 }
 
 TEMPERATURES = {
@@ -27,6 +31,8 @@ TEMPERATURES = {
     AgentRole.RESEARCHER: 0.2,
     AgentRole.IDEATOR: 0.4,
     AgentRole.SKEPTIC: 0.0,
+    AgentRole.VERIFIER: 0.0,
+    AgentRole.ACCOUNTABILITY: 0.0,
 }
 
 OUTPUT_TYPES = {
@@ -34,6 +40,8 @@ OUTPUT_TYPES = {
     AgentRole.RESEARCHER: MessageType.FINDING,
     AgentRole.IDEATOR: MessageType.IDEA,
     AgentRole.SKEPTIC: MessageType.CRITIQUE,
+    AgentRole.VERIFIER: MessageType.VERIFICATION,
+    AgentRole.ACCOUNTABILITY: MessageType.ACCOUNTABILITY,
 }
 
 OUTPUT_KINDS = {
@@ -41,12 +49,14 @@ OUTPUT_KINDS = {
     AgentRole.RESEARCHER: OutputKind.CLAIMS,
     AgentRole.IDEATOR: OutputKind.CLAIMS,
     AgentRole.SKEPTIC: OutputKind.VERDICTS,
+    AgentRole.VERIFIER: OutputKind.VERIFICATION,
+    AgentRole.ACCOUNTABILITY: OutputKind.ACCOUNTABILITY,
 }
 
 
-def test_exactly_four_unique_roles():
+def test_exactly_six_unique_roles():
     assert set(CONFIGS) == set(AgentRole)
-    assert len({c.role for c in CONFIGS.values()}) == 4
+    assert len({c.role for c in CONFIGS.values()}) == 6
 
 
 def test_temperature_table():
@@ -60,18 +70,23 @@ def test_output_type_mapping():
 
 
 def test_output_kind_table():
-    """All four agents are structured-output producers (PRD §6.6)."""
+    """All six agents are structured-output producers (PRD §6.6 + Phase 11 §6.8)."""
     for role, expected in OUTPUT_KINDS.items():
         assert CONFIGS[role].output_kind is expected, role
     assert all(c.output_kind is not OutputKind.PLAIN for c in CONFIGS.values())
 
 
 def test_capability_table():
-    """Phase 6 PRD §6.7: workers get tools, the Manager router gets none."""
+    """Phase 6 PRD §6.7 + Phase 11 §6.8: workers get tools, router/audits differ."""
     expected_workers = frozenset({"file_search", "file_reader", "web_search", "memory"})
     assert CONFIGS[AgentRole.MANAGER].capabilities == frozenset()
     for role in (AgentRole.RESEARCHER, AgentRole.IDEATOR, AgentRole.SKEPTIC):
         assert CONFIGS[role].capabilities == expected_workers, role
+    # Verifier checks sources (no memory workspace); Accountability is trace-only
+    assert CONFIGS[AgentRole.VERIFIER].capabilities == frozenset(
+        {"file_search", "file_reader", "web_search"}
+    )
+    assert CONFIGS[AgentRole.ACCOUNTABILITY].capabilities == frozenset()
 
 
 def test_directive_keywords_present():
@@ -105,10 +120,13 @@ def test_instruction_length_budget():
 
 def test_prompt_version_and_display_names():
     # Phase 6 touched the three worker prompts; the fallback hardening bumped
-    # Manager, Researcher, and Ideator again.
-    assert [CONFIGS[r].prompt_version for r in AgentRole] == [2, 3, 3, 2]
+    # Manager, Researcher, and Ideator again. Phase 11 adds two fresh roles;
+    # live-eval hardening bumped Skeptic (never-blank objection) and
+    # Verifier (recorded-evidence rule) to 3 and 2.
+    assert [CONFIGS[r].prompt_version for r in AgentRole] == [2, 3, 3, 3, 2, 1]
     assert {c.display_name for c in CONFIGS.values()} == {
         "Manager", "Researcher", "Ideator", "Skeptic",
+        "Verifier", "Accountability",
     }
 
 

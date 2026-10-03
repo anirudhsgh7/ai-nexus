@@ -55,6 +55,19 @@ describe("module boundaries", () => {
     expect(evidence).not.toMatch(/from\s+"react"/);
   });
 
+  it("audits.ts is pure (no I/O, no React)", () => {
+    // Phase 11: audit derivation joins the step trace for display only.
+    const audits = modules["../audits.ts"];
+    expect(audits).toBeDefined();
+    expect(audits).not.toMatch(/fetch\s*\(/);
+    expect(audits).not.toMatch(/EventSource/);
+    expect(audits).not.toMatch(/from\s+"react"/);
+    expect(audits).not.toContain('from "./api"');
+    expect(audits).not.toContain('from "./sse"');
+    expect(audits).not.toContain('from "./reducer"');
+    expect(audits).not.toContain('from "./evidence"');
+  });
+
   it("components import no api/sse modules directly", () => {
     const found = Object.entries(modules)
       .filter(([path]) => path.includes("/components/"))

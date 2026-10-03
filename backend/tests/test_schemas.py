@@ -7,16 +7,25 @@ from pydantic import ValidationError
 
 from app.llm.base import ToolCall
 from app.schemas import (
+    AccountabilityFlag,
+    AccountabilityFlagKind,
+    AccountabilityReport,
+    AccountabilityStatus,
     AgentMessage,
     AgentRole,
     Claim,
+    ClaimProvenance,
     ClaimStatus,
+    ClaimVerification,
     ClaimVerdict,
     DecisionAction,
     Evidence,
+    FlagSeverity,
     ManagerDecision,
     MessageType,
     ToolResult,
+    VerificationReport,
+    VerificationStatus,
     Verdict,
 )
 
@@ -90,11 +99,14 @@ def test_wire_field_names():
     data = json.loads(_msg().model_dump_json())
     assert set(data) == {
         "id", "from_agent", "to_agent", "type", "content", "claims",
-        "verdicts", "decision", "confidence", "tool_calls", "tool_results",
-        "round", "created_at",
+        "verdicts", "decision", "verification", "accountability", "confidence",
+        "tool_calls", "tool_results", "retries", "round", "created_at",
     }
     assert data["from_agent"] == "researcher"
     assert data["type"] == "finding"
+    assert data["verification"] is None
+    assert data["accountability"] is None
+    assert data["retries"] == 0
 
 
 # ------------------------------------------------------------------ defaults
@@ -107,6 +119,9 @@ def test_defaults():
     assert m.confidence is None
     assert m.tool_calls is None
     assert m.tool_results is None
+    assert m.verification is None
+    assert m.accountability is None
+    assert m.retries == 0
     assert m.round is None
     assert m.content == "x"
     assert m.created_at.tzinfo is not None
@@ -138,7 +153,7 @@ def test_round_ge_one():
 
 def test_invalid_role_and_type_rejected():
     with pytest.raises(ValidationError):
-        _msg(from_agent="verifier")
+        _msg(from_agent="auditor")  # verifier/accountability are valid now
     with pytest.raises(ValidationError):
         _msg(type="summary")
 
@@ -287,3 +302,139 @@ def test_decision_round_trip_on_message():
 def test_message_type_members():
     assert MessageType.DECISION.value == "decision"
     assert MessageType.REVISION.value == "revision"
+
+
+# ---------------------------------------------- Phase 11 audit report models
+
+def _verification_report() -> VerificationReport:
+    return VerificationReport(claims=[
+        ClaimVerification(
+            claim_id="c1",
+            verification_status=VerificationStatus.VERIFIED,
+            evidence_checked=["growth_report.txt"],
+            supporting_evidence=[Evidence(source="growth_report.txt", quote="23%")],
+            source_references=["growth_report.txt"],
+            explanation="Opened the file; the figure matches.",
+            confidence=0.9,
+        ),
+        ClaimVerification(
+            claim_id="c2",
+            verification_status=VerificationStatus.UNVERIFIABLE,
+            explanation="No authoritative source available.",
+            confidence=0.4,
+        ),
+    ])
+
+
+def _accountability_report() -> AccountabilityReport:
+    return AccountabilityReport(
+        trace_completeness=True,
+        final_claim_provenance=[
+            ClaimProvenance(
+                claim_id="c1", origin=AgentRole.RESEARCHER,
+                verdict=ClaimVerdict.SUPPORTED, evidence_count=1,
+            ),
+            ClaimProvenance(
+                claim_id="c2", origin=AgentRole.IDEATOR, verdict=None,
+            ),
+        ],
+        flags=[
+            AccountabilityFlag(
+                kind=AccountabilityFlagKind.RETRY_ACTIVITY,
+                severity=FlagSeverity.INFO,
+                refs=["4"],
+                explanation="One structured retry on step 4.",
+            ),
+        ],
+        overall_status=AccountabilityStatus.CLEAN,
+        summary="Trace complete; one retry, no provenance gaps.",
+    )
+
+
+def test_verification_report_round_trip_on_message():
+    report = _verification_report()
+    m = _msg(type=MessageType.VERIFICATION, verification=report, content="audit")
+    again = AgentMessage.model_validate_json(m.model_dump_json())
+    assert again == m
+    assert again.verification.claims[0].verification_status is VerificationStatus.VERIFIED
+    assert again.verification.claims[1].verification_status is VerificationStatus.UNVERIFIABLE
+
+
+def test_accountability_report_round_trip_on_message():
+    report = _accountability_report()
+    m = _msg(type=MessageType.ACCOUNTABILITY, accountability=report, content="audit")
+    again = AgentMessage.model_validate_json(m.model_dump_json())
+    assert again == m
+    assert again.accountability.overall_status is AccountabilityStatus.CLEAN
+    assert again.accountability.final_claim_provenance[0].verdict is ClaimVerdict.SUPPORTED
+    assert again.accountability.final_claim_provenance[1].verdict is None
+
+
+def test_retries_field_bounds_and_default():
+    assert _msg().retries == 0
+    assert _msg(retries=2).retries == 2
+    with pytest.raises(ValidationError):
+        _msg(retries=-1)
+
+
+def test_claim_verification_validation():
+    with pytest.raises(ValidationError):
+        ClaimVerification(
+            claim_id="c1",
+            verification_status=VerificationStatus.VERIFIED,
+            explanation="ok", confidence=1.01,
+        )
+    with pytest.raises(ValidationError):
+        ClaimVerification(
+            claim_id="c1",
+            verification_status=VerificationStatus.VERIFIED,
+            explanation="   ", confidence=0.5,
+        )
+    with pytest.raises(ValidationError):
+        ClaimVerification.model_validate({
+            "claim_id": "c1", "verification_status": "verified",
+            "explanation": "x", "confidence": 0.5, "extra": True,
+        })
+
+
+def test_verification_status_vocabulary_is_four_valued():
+    assert {s.value for s in VerificationStatus} == {
+        "verified", "contradicted", "unverifiable", "partially_verified",
+    }
+
+
+def test_accountability_flag_validation():
+    with pytest.raises(ValidationError):
+        AccountabilityFlag(
+            kind=AccountabilityFlagKind.PREMATURE_STOP,
+            severity=FlagSeverity.WARNING,
+            explanation="stopped early",
+            refs=["2"],
+            extra_field=True,  # type: ignore[call-arg]
+        )
+    with pytest.raises(ValidationError):
+        AccountabilityFlag(
+            kind=AccountabilityFlagKind.PREMATURE_STOP,
+            severity=FlagSeverity.WARNING,
+            explanation=" ",
+        )
+
+
+def test_accountability_flag_kind_families():
+    kinds = {k.value for k in AccountabilityFlagKind}
+    assert kinds == {
+        "trace_incompleteness", "unsupported_final_claim",
+        "unresolved_claim_suppressed", "decision_inconsistency",
+        "evidence_provenance_gap", "tool_use_inconsistency",
+        "peer_prose_exposure", "premature_stop",
+        "confidence_evidence_mismatch", "retry_activity",
+    }
+
+
+def test_new_roles_and_message_types():
+    assert {r.value for r in AgentRole} == {
+        "manager", "researcher", "ideator", "skeptic",
+        "verifier", "accountability",
+    }
+    assert MessageType.VERIFICATION.value == "verification"
+    assert MessageType.ACCOUNTABILITY.value == "accountability"

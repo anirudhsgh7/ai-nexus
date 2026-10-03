@@ -19,6 +19,7 @@ from app.runs import (
     RunRecord,
     RunStatus,
     STREAM_CLOSED,
+    StepKind,
     StepRecord,
 )
 
@@ -87,6 +88,14 @@ def _round_payload(snap: RoundSnapshot) -> dict[str, Any]:
     }
 
 
+def _audit_message(run: RunRecord, kind: StepKind) -> Any:
+    """The completed audit step's message (Phase 11 §6.10), else None."""
+    for step in reversed(run.steps):
+        if step.kind is kind and step.message is not None:
+            return step.message.model_dump(mode="json")
+    return None
+
+
 def _run_payload(run: RunRecord) -> dict[str, Any]:
     return {
         "run_id": run.id,
@@ -106,6 +115,10 @@ def _run_payload(run: RunRecord) -> dict[str, Any]:
             if run.status is RunStatus.COMPLETED and run.rounds
             else None
         ),
+        # Phase 11: the two audit steps surfaced for the UI (null when the
+        # run never reached them).
+        "verification": _audit_message(run, StepKind.VERIFY),
+        "accountability": _audit_message(run, StepKind.AUDIT),
         "final_message": (
             run.final_message.model_dump(mode="json") if run.final_message else None
         ),

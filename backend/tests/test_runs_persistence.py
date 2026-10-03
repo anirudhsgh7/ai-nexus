@@ -29,7 +29,7 @@ from app.schemas import (
     DecisionAction,
     ManagerDecision,
 )
-from tests.fakes import FakeProvider
+from tests.fakes import AuditAwareFakeProvider, FakeProvider
 
 TASK = "Should we build X?"
 
@@ -82,7 +82,7 @@ ITERATIVE_PAYLOADS = [
 
 
 async def _execute_iterative(path: Path) -> tuple[RunManager, RunRecord]:
-    provider = FakeProvider()
+    provider = AuditAwareFakeProvider()
     for payload in ITERATIVE_PAYLOADS:
         provider.queue_result(FakeProvider.make_result(payload))
     manager = RunManager(store=RunStore(path))
@@ -92,7 +92,7 @@ async def _execute_iterative(path: Path) -> tuple[RunManager, RunRecord]:
     )
     await orchestrator.execute(run.id)
     assert run.status is RunStatus.COMPLETED
-    assert len(run.steps) == 9, "ITERATIVE chain shape"
+    assert len(run.steps) == 11, "ITERATIVE chain shape + Phase 11 audits"
     return manager, run
 
 

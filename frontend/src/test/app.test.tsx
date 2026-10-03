@@ -84,6 +84,8 @@ function payload(runId: string, task: string): RunPayload {
     steps: [],
     rounds: [],
     selected_round: null,
+    verification: null,
+    accountability: null,
     final_message: null,
     error: null,
   };
@@ -181,7 +183,9 @@ describe("running a task", () => {
 
     expect(await screen.findByText("FINAL RESULT")).toBeInTheDocument();
     const finalCard = screen.getByLabelText("Final result");
-    expect(within(finalCard).getByText(/Final answer\./)).toBeInTheDocument();
+    expect(
+      within(finalCard).getByText(/Recommendation: adopt AI tooling/),
+    ).toBeInTheDocument();
     expect(screen.getByText(/#2 · Researcher · research · r1/)).toBeInTheDocument();
     expect(screen.getByText(/#9 · Manager · synthesize/)).toBeInTheDocument();
     expect(screen.getByText("Round 1")).toBeInTheDocument();
@@ -445,9 +449,12 @@ describe("evidence panels (Phase 9)", () => {
             reason: "revision produced no progress",
             confidence: 0,
           },
+          verification: null,
+          accountability: null,
           confidence: null,
           tool_calls: null,
           tool_results: null,
+          retries: 0,
           round: 2,
           created_at: "2026-10-02T12:00:00.000Z",
         },
@@ -513,5 +520,131 @@ describe("evidence panels (Phase 9)", () => {
     deferredResolve!({ ...detail, run_id: "run-a" });
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(screen.queryAllByLabelText(/^Round \d+ evidence$/)).toHaveLength(0);
+  });
+});
+
+// ------------------------------------------------- Phase 11: audit panels
+
+describe("audit panels (Phase 11)", () => {
+  it("renders the Verifier's report from the step trace", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-1", status: "running" });
+    mockGetRun.mockResolvedValue({ ...detail, run_id: "run-1" });
+    const stream = await submitAndWatch(detail.task);
+    stream.emit(events);
+
+    expect(await screen.findByText("FINAL RESULT")).toBeInTheDocument();
+    const panel = await screen.findByLabelText(
+      "Verification of the final answer",
+    );
+    // counts line mirrors the fixture's five entries
+    expect(
+      within(panel).getByText(
+        /VERIFICATION · 5 claims · 2 verified · 1 partial · 1 contradicted · 1 unverifiable/,
+      ),
+    ).toBeInTheDocument();
+    // every status renders as a text label, scoped to the panel
+    expect(within(panel).getAllByText("Verified").length).toBe(2);
+    expect(within(panel).getByText("Partially verified")).toBeInTheDocument();
+    expect(within(panel).getByText("Contradicted")).toBeInTheDocument();
+    expect(within(panel).getByText("Unverifiable")).toBeInTheDocument();
+    // explanations and source references render
+    expect(
+      within(panel).getByText(/Primary source states the figure verbatim/),
+    ).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/sources: INRIX Global Traffic Scorecard/),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the Accountability report with enforced flags and provenance", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-1", status: "running" });
+    mockGetRun.mockResolvedValue({ ...detail, run_id: "run-1" });
+    const stream = await submitAndWatch(detail.task);
+    stream.emit(events);
+
+    expect(await screen.findByText("FINAL RESULT")).toBeInTheDocument();
+    const panel = await screen.findByLabelText(
+      "Accountability process audit",
+    );
+    expect(
+      within(panel).getByText("Warnings"),
+    ).toBeInTheDocument(); // overall status chip
+    expect(within(panel).getByText(/trace complete —/)).toBeInTheDocument();
+    // provenance rows (scoped: claim ids also appear in round panels)
+    expect(within(panel).getByText(/\[c6\]/)).toBeInTheDocument();
+    // provenance rows for c2 and c6 are both supported
+    expect(within(panel).getAllByText("Supported").length).toBeGreaterThanOrEqual(2);
+    // flags: two echoed by the model + two appended by enforcement
+    expect(
+      within(panel).getAllByText(/unsupported final claim/).length,
+    ).toBeGreaterThan(0);
+    expect(within(panel).getByText(/premature stop/)).toBeInTheDocument();
+    expect(within(panel).getByText(/unresolved claim suppressed/)).toBeInTheDocument();
+    expect(
+      within(panel).getByText(/confidence evidence mismatch/),
+    ).toBeInTheDocument();
+    // severity chips are text-labeled
+    expect(within(panel).getAllByText("warning").length).toBeGreaterThan(0);
+  });
+
+  it("shows no audit panels before the audit steps exist", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-1", status: "running" });
+    mockGetRun.mockResolvedValue(payload("run-1", "Should we build X?"));
+    const stream = await submitAndWatch("Should we build X?");
+    // emit only the pre-audit portion of the trace
+    const withoutAudits = events.filter(
+      (e) => e.kind !== "verify" && e.kind !== "audit",
+    );
+    stream.emit(withoutAudits);
+
+    expect(await screen.findByText("FINAL RESULT")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Verification of the final answer"),
+    ).toBeNull();
+    expect(
+      screen.queryByLabelText("Accountability process audit"),
+    ).toBeNull();
+  });
+
+  it("surfaces structured-output retries on the step card", async () => {
+    mockCreateRun.mockResolvedValue({ run_id: "run-1", status: "running" });
+    mockGetRun.mockResolvedValue(payload("run-1", "Should we build X?"));
+    const stream = await submitAndWatch("Should we build X?");
+    stream.emit([
+      {
+        seq: 90,
+        type: "step_completed",
+        run_id: "run-1",
+        ts: "2026-10-03T12:00:00.000Z",
+        step: 4,
+        kind: "critique",
+        agent: "skeptic",
+        round: 1,
+        task: null,
+        message: {
+          id: "retried",
+          from_agent: "skeptic",
+          to_agent: null,
+          type: "critique",
+          content: "Checked the claims twice.",
+          claims: null,
+          verdicts: null,
+          decision: null,
+          verification: null,
+          accountability: null,
+          confidence: null,
+          tool_calls: null,
+          tool_results: null,
+          retries: 2,
+          round: 1,
+          created_at: "2026-10-03T12:00:00.000Z",
+        },
+        duration_ms: 12.0,
+        skipped: null,
+        error: null,
+      },
+    ]);
+
+    expect(await screen.findByText(/2 retries/)).toBeInTheDocument();
   });
 });

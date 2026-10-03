@@ -66,6 +66,8 @@ class StepKind(str, Enum):
     DECIDE = "decide"          # Phase 5
     REVISE = "revise"          # Phase 5
     SYNTHESIZE = "synthesize"
+    VERIFY = "verify"          # Phase 11: final-answer audit
+    AUDIT = "audit"            # Phase 11: trace/process audit
 
 
 class StepStatus(str, Enum):

@@ -770,3 +770,72 @@ details.claim-card[open] > .claim-head::after {
   color: var(--muted);
   margin: 0 0 6px;
 }
+
+/* ------------------------------------------------- Phase 11 audit panels */
+
+.verification-panel,
+.accountability-panel {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  border-left: 3px solid var(--agent-skeptic);
+  padding: 8px 14px 12px;
+  margin-top: 6px;
+}
+
+.accountability-panel {
+  border-left-color: var(--agent-manager);
+}
+
+.verification-panel .evidence-heading,
+.accountability-panel .evidence-heading {
+  margin-top: 4px;
+}
+
+/* verification status chips */
+.vf-verified {
+  background: #dcfce7;
+  color: #166534;
+}
+.vf-contradicted {
+  background: #fee2e2;
+  color: #991b1b;
+}
+.vf-unverifiable {
+  background: #f1f5f9;
+  color: #475569;
+}
+.vf-partial {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+/* accountability flag severity chips */
+.flag-info {
+  background: #e0f2fe;
+  color: #075985;
+}
+.flag-warning {
+  background: #fef3c7;
+  color: #92400e;
+}
+.flag-violation {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+/* the two audit roles need distinct dots/badges */
+.agent-verifier {
+  background: #0f766e;
+}
+.agent-accountability {
+  background: #4338ca;
+}
+.agent-text.agent-verifier {
+  color: #0f766e;
+  background: none;
+}
+.agent-text.agent-accountability {
+  color: #4338ca;
+  background: none;
+}

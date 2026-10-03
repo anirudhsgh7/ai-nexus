@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import re
 from collections.abc import Sequence
 from typing import AsyncIterator
 
+from app.agents.structured import ACCOUNTABILITY_SCHEMA, VERIFICATION_SCHEMA
+
 from app.llm.base import (
     ChatMessage,
+    ChatRole,
     CompletionResult,
     LLMProvider,
     ModelInfo,
@@ -70,3 +75,68 @@ class FakeProvider(LLMProvider):
 
     async def aclose(self) -> None:
         pass
+
+
+# ---------------------------------------------------- Phase 11 audit fake
+
+
+class AuditAwareFakeProvider(FakeProvider):
+    """Synthesizes the two Phase 11 audit responses from the request itself.
+
+    `validate_verification` requires coverage of the exact claim ids the
+    Verifier received, which differs per chain — so the report is built from
+    the `CLAIMS TO EVALUATE` block of the actual request. `unverifiable`
+    statuses carry no evidence constraints, keeping orchestration chains
+    focused on shape (content rules live in test_audits / test_agents_audit).
+    """
+
+    def __init__(self, results=None, *, fail_audit: Exception | None = None,
+                 fail_verify: Exception | None = None) -> None:
+        super().__init__(results)
+        self.fail_audit = fail_audit
+        self.fail_verify = fail_verify
+
+    async def chat(self, messages, **kwargs):  # type: ignore[override]
+        schema = kwargs.get("response_format")
+        if schema is VERIFICATION_SCHEMA or schema is ACCOUNTABILITY_SCHEMA:
+            self.chat_calls.append({"messages": list(messages), "kwargs": dict(kwargs)})
+            if schema is ACCOUNTABILITY_SCHEMA:
+                if self.fail_audit is not None:
+                    raise self.fail_audit
+                payload = json.dumps({
+                    "content": "process audit",
+                    "trace_completeness": True,
+                    "final_claim_provenance": [],
+                    "flags": [],
+                    "overall_status": "clean",
+                    "summary": "no process gaps found",
+                })
+            else:
+                if self.fail_verify is not None:
+                    raise self.fail_verify
+                user = next(
+                    (
+                        m.content for m in reversed(messages)
+                        if m.role is ChatRole.USER
+                    ),
+                    "",
+                )
+                ids = list(dict.fromkeys(re.findall(r"\[(c\d+)\]", user)))
+                payload = json.dumps({
+                    "content": "verified against the provided records",
+                    "claims": [
+                        {
+                            "claim_id": cid,
+                            "verification_status": "unverifiable",
+                            "evidence_checked": [],
+                            "supporting_evidence": [],
+                            "contradicting_evidence": [],
+                            "source_references": [],
+                            "explanation": "no authoritative source in this context",
+                            "confidence": 0.5,
+                        }
+                        for cid in ids
+                    ],
+                })
+            return FakeProvider.make_result(payload)
+        return await super().chat(messages, **kwargs)

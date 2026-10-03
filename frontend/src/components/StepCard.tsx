@@ -35,6 +35,12 @@ function structureLine(message: AgentMessage): string | null {
   if (message.tool_calls !== null && message.tool_calls.length > 0) {
     fragments.push(pluralize(message.tool_calls.length, "tool call"));
   }
+  if (message.retries > 0) {
+    // pluralize() naively appends "s"; "retr" + "ies" is spelled by hand
+    fragments.push(
+      message.retries === 1 ? "1 retry" : `${message.retries} retries`,
+    );
+  }
   return fragments.length > 0 ? fragments.join(" · ") : null;
 }
 
