@@ -162,6 +162,8 @@ coverage/
 # Local benchmark runs (measured per machine, not source)
 benchmark_results*.json
 eval_results*.json
+# Phase 11b baseline snapshot — disposable artifact, backed up with local docs
+eval_baseline*.json
 .hypothesis/
 .tox/
 .nox/
