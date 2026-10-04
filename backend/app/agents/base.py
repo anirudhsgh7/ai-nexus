@@ -255,7 +255,7 @@ class Agent:
                     result, parsed, retries = await self._structured_attempts(
                         phase_b_messages, kind, input_claims,
                         effective_max_tokens,
-                        tool_calls_executed=len(outcome.calls),
+                        tool_calls_executed=sum(1 for r in outcome.outcomes if r.error is None),
                         tools_available=True,
                     )
                     usage = result.usage

@@ -42,4 +42,5 @@ CONFIG = AgentConfig(
     output_kind=OutputKind.VERIFICATION,
     capabilities=frozenset({"file_search", "file_reader", "web_search"}),
     prompt_version=2,
+    max_tokens=4096,
 )

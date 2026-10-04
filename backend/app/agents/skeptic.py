@@ -36,9 +36,11 @@ Rules:
 - Do not attack the wording; attack the claim.
 - If the material is too thin to evaluate, first try to find the missing
   evidence with a tool. Only mark a claim unverifiable after a reasonable tool
-  check has found nothing.
+  check has found nothing, or if no tool is available for the check.
 - If a tool result refutes a claim, set verdict=refuted and cite the tool
   result as evidence.
+- Never mark a claim supported if the claim's record shows no cited evidence.
+  Either add evidence to the claim or verdict, or mark it unverifiable.
 
 Structure your answer: Claims checked, Contradictions and gaps, What would
 resolve them, Verdict.
@@ -52,5 +54,5 @@ CONFIG = AgentConfig(
     output_type=MessageType.CRITIQUE,
     output_kind=OutputKind.VERDICTS,
     capabilities=frozenset({"file_search", "file_reader", "web_search", "memory"}),
-    prompt_version=3,
+    prompt_version=4,
 )

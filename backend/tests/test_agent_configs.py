@@ -123,7 +123,7 @@ def test_prompt_version_and_display_names():
     # Manager, Researcher, and Ideator again. Phase 11 adds two fresh roles;
     # live-eval hardening bumped Skeptic (never-blank objection) and
     # Verifier (recorded-evidence rule) to 3 and 2.
-    assert [CONFIGS[r].prompt_version for r in AgentRole] == [2, 3, 3, 3, 2, 1]
+    assert [CONFIGS[r].prompt_version for r in AgentRole] == [2, 3, 3, 4, 2, 1]
     assert {c.display_name for c in CONFIGS.values()} == {
         "Manager", "Researcher", "Ideator", "Skeptic",
         "Verifier", "Accountability",
@@ -143,4 +143,8 @@ def test_tool_failure_fallback_is_declared():
 @pytest.mark.parametrize("role", list(AgentRole))
 def test_role_defaults_to_primary_model(role):
     assert CONFIGS[role].model is None
-    assert CONFIGS[role].max_tokens is None
+    # Verifier has max_tokens=4096 to handle large verification reports
+    if role == AgentRole.VERIFIER:
+        assert CONFIGS[role].max_tokens == 4096
+    else:
+        assert CONFIGS[role].max_tokens is None

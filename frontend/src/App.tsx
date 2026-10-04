@@ -36,6 +36,7 @@ export default function App() {
   // those points and on terminal events — no polling (Phase 9 PRD §6.7).
   const [rounds, setRounds] = useState<RoundSummary[]>([]);
   const [selectedRound, setSelectedRound] = useState<number | null>(null);
+  const [roundRefreshError, setRoundRefreshError] = useState<string | null>(null);
   const roundsReqRef = useRef(0);
   const streamRef = useRef<RunStreamHandle | null>(null);
 
@@ -47,9 +48,13 @@ export default function App() {
       if (token !== roundsReqRef.current) return; // superseded / run switched
       setRounds(payload.rounds);
       setSelectedRound(payload.selected_round);
+      setRoundRefreshError(null);
     } catch (error) {
       // Keep whatever evidence we already have; the feed itself is unaffected.
       console.error("round refresh failed", error);
+      setRoundRefreshError(
+        "Evidence unavailable — reselect the run to retry"
+      );
     }
   }, []);
 
@@ -123,6 +128,7 @@ export default function App() {
       setFormError(null);
       setActionError(null);
       setNotice(null);
+      setRoundRefreshError(null);
       setBusy(true);
       try {
         const created = await createRun(task);
@@ -176,6 +182,7 @@ export default function App() {
     async (runId: string): Promise<void> => {
       setActionError(null);
       setNotice(null);
+      setRoundRefreshError(null);
       try {
         await startRunView(runId);
       } catch (error) {
@@ -215,6 +222,11 @@ export default function App() {
 
       {notice !== null ? <p className="notice">{notice}</p> : null}
       {actionError !== null ? <ErrorCard error={actionError} /> : null}
+      {roundRefreshError !== null ? (
+        <p className="notice" style={{ color: "#d97706" }}>
+          {roundRefreshError}
+        </p>
+      ) : null}
 
       {view !== null ? (
         <>

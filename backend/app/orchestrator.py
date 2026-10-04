@@ -433,10 +433,13 @@ def select_best_round(snapshots: Sequence[RoundSnapshot]) -> RoundSnapshot:
     """Net evidence score first (supported - unresolved), later round on ties.
 
     Empty rounds score 0 and cannot beat a net-positive round (PRD §6.6).
+    Empty rounds cannot beat non-empty rounds even if the non-empty round has
+    a net-negative score.
     """
     return max(
         snapshots,
-        key=lambda snap: (snap.supported_count - snap.unresolved_count,
+        key=lambda snap: (bool(snap.claims),
+                          snap.supported_count - snap.unresolved_count,
                           snap.round_number),
     )
 

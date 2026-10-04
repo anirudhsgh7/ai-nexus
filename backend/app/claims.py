@@ -80,7 +80,9 @@ def validate_verdicts(
         if claim is None:
             violations.append(f"verdict for unknown claim {verdict.claim_id}")
             continue
-        if verdict.verdict is ClaimVerdict.SUPPORTED and not claim.evidence:
+        # Check either claim.evidence OR verdict.evidence (both are valid)
+        has_evidence = bool(claim.evidence) or bool(verdict.evidence)
+        if verdict.verdict is ClaimVerdict.SUPPORTED and not has_evidence:
             violations.append(f"claim {verdict.claim_id} marked supported without evidence")
 
     for claim in claims:

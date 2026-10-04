@@ -207,6 +207,11 @@ async def stream_events(request: Request, run_id: str) -> Any:
                 yield _sse_frame(event)
                 if event.type in TERMINAL_EVENT_TYPES:
                     return
+            # After replaying backlog, check if run is already terminal
+            # If so, return instead of waiting for events that will never come
+            run = runs.get(run_id)
+            if run is not None and run.status in (RunStatus.COMPLETED, RunStatus.FAILED):
+                return
             while True:
                 try:
                     event = await asyncio.wait_for(queue.get(), SSE_KEEPALIVE_S)

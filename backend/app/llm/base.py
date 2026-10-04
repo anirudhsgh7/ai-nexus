@@ -124,6 +124,16 @@ class ResponseParseError(LLMError):
         super().__init__(message, hint="Malformed upstream response; check Ollama version.")
 
 
+class ContextOverflowError(LLMError):
+    def __init__(self, estimated_tokens: int, num_ctx: int) -> None:
+        super().__init__(
+            f"Prompt too large: estimated {estimated_tokens} tokens exceeds context window {num_ctx}",
+            hint="Reduce prompt size or increase AI_NEXUS_NUM_CTX.",
+        )
+        self.estimated_tokens = estimated_tokens
+        self.num_ctx = num_ctx
+
+
 class LLMProvider(ABC):
     """Contract every provider implements; keyword params resolve from Settings."""
 

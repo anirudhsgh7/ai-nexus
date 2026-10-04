@@ -141,11 +141,11 @@ _CLAIMS_SENTENCE = (
 _VERDICTS_SENTENCE = (
     'In "verdicts", evaluate every claim under "CLAIMS TO EVALUATE" with exactly '
     "one entry per claim. Use verdict=supported only when the claim's cited "
-    "evidence supports it, and a supported verdict must list that evidence in "
-    "the entry — without evidence in the entry, use unverifiable instead of "
-    "supported. Every entry's objection must be a non-empty sentence; for "
-    "supported claims state what the evidence shows, for "
-    "unverifiable claims name the missing evidence."
+    "evidence supports it, and a supported verdict requires evidence in either "
+    "the claim or the verdict entry — without evidence in either, use "
+    "unverifiable instead of supported. Every entry's objection must be a "
+    "non-empty sentence; for supported claims state what the evidence shows, "
+    "for unverifiable claims name the missing evidence."
 )
 
 DECISION_SCHEMA: dict = {
@@ -335,7 +335,7 @@ _FIX_HINTS: tuple[tuple[str, str], ...] = (
     ),
     (
         "marked supported without evidence",
-        "list the supporting evidence in that verdict entry, or use "
+        "add an evidence entry with a source to either the claim or the verdict entry, or use "
         "verdict=unverifiable instead of supported",
     ),
     ("has no objection", "write a non-empty objection sentence for that verdict"),
@@ -362,6 +362,14 @@ _FIX_HINTS: tuple[tuple[str, str], ...] = (
     (
         "contradicted without contradicting evidence",
         "add the contradicting evidence, or use unverifiable",
+    ),
+    (
+        "verdict for unknown claim",
+        "copy the exact claim id as printed (e.g. c1, c2); do not add brackets or other characters",
+    ),
+    (
+        "verified claims require at least one independent tool check",
+        "downgrade verified and partially_verified entries to unverifiable since no tool check was performed",
     ),
 )
 

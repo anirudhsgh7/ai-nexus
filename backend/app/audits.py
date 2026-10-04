@@ -103,7 +103,7 @@ def _select_snapshot(rounds: Sequence[RoundSnapshot]) -> RoundSnapshot | None:
     if not rounds:
         return None
     return max(
-        rounds, key=lambda r: (r.supported_count - r.unresolved_count, r.round_number)
+        rounds, key=lambda r: (bool(r.claims), r.supported_count - r.unresolved_count, r.round_number)
     )
 
 

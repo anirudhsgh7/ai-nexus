@@ -21,6 +21,7 @@ from app.llm.base import (
     ChatMessage,
     ChatRole,
     CompletionResult,
+    ContextOverflowError,
     LLMProvider,
     ModelInfo,
     ProviderHealth,
@@ -152,6 +153,8 @@ class OllamaProvider(LLMProvider):
 
     def _precheck_context(self, messages: Sequence[ChatMessage], num_ctx: int) -> None:
         estimate = self._estimate_prompt_tokens(messages)
+        if estimate >= num_ctx:
+            raise ContextOverflowError(estimate, num_ctx)
         if estimate >= 0.9 * num_ctx:
             log.context_pressure(
                 logger, estimated_tokens=estimate, num_ctx=num_ctx
@@ -160,6 +163,8 @@ class OllamaProvider(LLMProvider):
     @staticmethod
     def _postcheck_context(usage: TokenUsage, num_ctx: int) -> None:
         prompt = usage.prompt_tokens
+        if prompt is not None and prompt >= num_ctx:
+            raise ContextOverflowError(prompt, num_ctx)
         if prompt is not None and prompt >= 0.95 * num_ctx:
             log.context_truncation_suspected(
                 logger, prompt_tokens=prompt, num_ctx=num_ctx
