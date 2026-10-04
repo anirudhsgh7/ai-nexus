@@ -35,6 +35,7 @@ RFC.md
 
 # All other markdown / docs
 *.md
+!README.md
 !*.md.keep
 *.mdx
 *.markdown
