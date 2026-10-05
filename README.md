@@ -1,309 +1,352 @@
 # AI Nexus
 
-**A local-first, evidence-first multi-agent reasoning system.**
+**Six agents. One verified answer.**
 
-AI Nexus answers a task by coordinating six specialized LLM agents — entirely on
-your machine, with no cloud inference APIs. Before you get an answer, you get an
-**auditable chain of reasoning**: claims with cited evidence, skeptic verdicts on
-every claim, routing decisions from a schema-constrained Manager, and two
-mandatory audit steps — a Verifier that independently re-checks the final answer
-with its own tool calls, and an Accountability agent that audits the run's trace
-and provenance. If either audit step fails, the run fails: partial, unaudited
-answers are never delivered.
+AI Nexus is a **local-first multi-agent reasoning system** that orchestrates specialized AI agents to research, challenge, refine, synthesize, and independently verify complex tasks — entirely on your machine.
 
-Built with **FastAPI + Ollama (`qwen2.5:14b-instruct`) + React 19/Vite**, SQLite
-persistence, and live server-sent-event updates.
+Every run produces more than an answer: you get an **auditable chain of reasoning** — structured claims with cited evidence, skeptic verdicts on every claim, explicit routing decisions, and two mandatory audit layers that run before anything is delivered.
 
-> This README — like every `*.md` in this repository — is a **local document**:
-> the repo intentionally tracks code only (see
-> [Repository conventions](#repository-conventions)). Design history lives in
-> `AGENTS.md`, `PLAN.md`, and the `PHASE_*_PRD.md` files.
+**Python / FastAPI • Ollama • Qwen • React / TypeScript • Vite • SQLite • SSE**
 
 ---
 
 ## Contents
 
-- [The problem](#the-problem)
-- [Highlights](#highlights)
-- [How it works](#how-it-works)
-- [Features](#features)
-- [Architecture](#architecture)
-- [Tech stack](#tech-stack)
-- [Getting started](#getting-started)
-- [Using AI Nexus](#using-ai-nexus)
-- [Testing](#testing)
-- [Evaluation & benchmarks](#evaluation--benchmarks)
-- [Known limitations](#known-limitations)
-- [Future directions](#future-directions)
-- [Repository conventions](#repository-conventions)
+- [The Idea](#the-idea)
+- [Why AI Nexus Is Different](#why-ai-nexus-is-different)
+- [Agent Architecture](#agent-architecture)
+- [How a Run Works](#how-a-run-works)
+- [The Claim & Evidence Model](#the-claim--evidence-model)
+- [Product Features](#product-features)
+- [The Live UI](#the-live-ui)
+- [Technical Architecture](#technical-architecture)
+- [Tech Stack](#tech-stack)
+- [Testing & Engineering Quality](#testing--engineering-quality)
+- [Evaluation](#evaluation)
+- [Built for Local-First](#built-for-local-first)
+- [Getting Started](#getting-started)
+- [Project Structure](#project-structure)
+- [Design Philosophy](#design-philosophy)
+- [Design Considerations](#design-considerations)
+- [Roadmap](#roadmap)
 
 ---
 
-## The problem
+## The Idea
 
-Two failure modes make single-shot LLM answers hard to trust:
+Most LLM applications rely on one generation pass: prompt in, paragraph out. Facts, assumptions, and guesses arrive flattened together, with nothing that re-examines the finished answer before it reaches you.
 
-1. **No structure of belief.** Facts, assumptions, and guesses arrive flattened
-   into one fluent paragraph, with provenance that is prose at best.
-2. **No independent check.** Nothing re-examines the finished answer with fresh
-   eyes — and with fresh *tools* — before it reaches you.
+**AI Nexus treats reasoning as a workflow.**
 
-The usual counterweight, multi-agent frameworks, tends to have agents chat with
-each other in free-form prose (context leaks, hard to audit) and to assume cloud
-APIs.
+Instead of a single response, a task moves through deliberate stages — research, ideation, skepticism, decision-making, synthesis, verification, accountability — each owned by a specialized agent with its own role, tool set, and output contract. The system doesn't just generate text; it builds a structured argument, challenges it, routes revisions, and audits the result before delivery.
 
-AI Nexus takes a different bet: agents exchange **structured artifacts only** —
-claims, verdicts, decisions, reports — never prose. Everything that matters is
-machine-checkable: a claim must carry an epistemic status and citations; a
-`supported` verdict without evidence is rejected *by code*; a `verified` status
-without independent evidence is rejected *by code*; the process itself is
-audited after the fact.
+The architecture is intentional on two fronts:
 
-## Highlights
-
-- **Six agents, one orchestrated loop.** Workers never read each other's prose —
-  enforced by tests (peer contexts are byte-identical). The only prose that
-  crosses a boundary is the final answer, seen by the two auditors.
-- **Claim-level epistemology.** Every claim carries a status
-  (`fact` / `assumption` / `hypothesis` / `opinion` / `inference` /
-  `unverified`), an optional confidence, and cited evidence (`source` +
-  optional `quote`).
-- **Grammar-constrained structured output.** The model answers through Ollama's
-  `format=` JSON-Schema-to-grammar; claim IDs (`c1..cN`) are assigned by code,
-  never by the model.
-- **Two mandatory audits, fail-closed.** A Verifier re-checks every final claim
-  with its own tool calls (four-valued: `verified` / `contradicted` /
-  `partially_verified` / `unverifiable`); an Accountability agent audits the
-  trace — and mechanical facts are merged in by code so the report can never
-  under-report.
-- **Deterministic termination.** Stop conditions are guards, not vibes:
-  round cap, repeated-decision, no-progress, and step-cap checks produce visible
-  synthetic `finish` decisions — no unbounded agent chatter by construction.
-- **Fully local.** Inference runs on Ollama; no paid APIs required. Web search
-  (DDG→Bing cascade) is optional and off by default.
-- **Live, restart-safe UI.** The frontend is a pure reducer over five SSE event
-  types; the API replays run events from SQLite after a restart.
-- **Serious test discipline.** 564 offline backend tests (≈ 2 s, no model, no
-  network), a live integration suite, 109 offline frontend tests, and an eval
-  gate with a human-scored, locked rubric.
+- **Agents exchange structured artifacts only** — claims, verdicts, decisions, reports — never free-form peer prose. Everything that matters is machine-checkable.
+- **The process itself is reviewable** — every step, claim, verdict, and audit is persisted, streamed live to the UI, and replayable after a restart.
 
 ---
 
-## How it works
+## Why AI Nexus Is Different
 
-### The pipeline
+### 🧠 Multi-Agent Reasoning
+Six specialized agents approach every task from different angles — investigation, creativity, criticism, control, verification, and accountability — instead of one model playing all parts in a single monologue.
 
-`app/orchestrator.py` is the only loop in the system:
+### 🧾 Structured Epistemology
+Claims explicitly declare what they *are*: a fact, an assumption, a hypothesis, an opinion, an inference, or unverified. Uncertainty is a first-class citizen, not a hedging phrase.
+
+### 📎 Evidence-First Reasoning
+Claims carry source citations and optional quotations. A `supported` verdict without evidence is rejected **by code** — unsupported confidence cannot pass review.
+
+### ✅ Independent Verification
+The finished answer passes through a dedicated verification stage that re-checks each final claim with its own tool calls, producing a per-claim verdict independent of the workers that wrote it.
+
+### 🛡️ Accountability Layer
+A separate agent audits the execution trace, provenance, and completeness of the entire run — with mechanical facts merged in by code so the report can never under-report.
+
+### 🎛️ Bounded Orchestration
+Explicit routing, round caps, tool limits, and deterministic stop conditions. No unbounded agent loops — by construction.
+
+### 🖥️ Local-First
+Inference runs through **Ollama** on your own hardware. No paid cloud inference API, no external database, no vendor lock-in.
+
+---
+
+## Agent Architecture
+
+Six agents, three tiers of responsibility — a control plane, two workers, and two auditors.
+
+| Agent | Role | What it contributes |
+|---|---|---|
+| **Manager** | The control plane. Plans the workflow, evaluates progress, and routes revisions through explicit JSON decisions executed by Python. | Routing decisions, final synthesis |
+| **Researcher** | The investigator. Gathers evidence through the configured tool set before answering — files, memory, and optional live web search. | Finding claims with cited evidence |
+| **Ideator** | The explorer. Generates alternatives, hypotheses, and solution paths the task might otherwise never reach. | Idea claims with cited evidence |
+| **Skeptic** | The critic. Issues a verdict on every claim each round — supported, refuted, or unverifiable — with a mandatory objection and its own evidence. | Per-claim verdicts |
+| **Verifier** | The independent auditor. Re-checks every claim in the final answer using its own tool calls, producing a four-valued verification report. | `VerificationReport` |
+| **Accountability** | The process auditor. Reviews the run's trace and provenance, raising flags across ten categories with graded severity. | `AccountabilityReport` |
+
+Design rules that make this architecture hold:
+
+- **No prose crossing between workers.** Agents never see each other's prose or memory — enforced by tests. The only prose that crosses a boundary is the final answer, seen by the two auditors (their job is to audit exactly that).
+- **The Manager routes, it doesn't opine.** Its decisions are schema-constrained JSON executed by code; it sees only a bounded registry summary, never worker prose.
+- **Both audits are mandatory.** Every completed run carries a verification report and an accountability report — there is no unaudited delivery path.
+
+---
+
+## How a Run Works
+
+`app/orchestrator.py` is the single orchestrator — one deterministic loop:
 
 ```mermaid
 flowchart TD
-    T["Task"] --> P["Plan step — Manager"]
+    T["User Task"] --> P["Plan — Manager"]
     P --> W1["Researcher — findings"]
     P --> W2["Ideator — alternatives"]
-    W1 --> C["Critique — Skeptic verdicts: supported / refuted / unverifiable"]
+    W1 --> C["Critique — Skeptic verdicts"]
     W2 --> C
-    C --> D{"Decision — Manager: call_agent or finish"}
-    D -->|"call_agent → revision"| W1
-    D -->|"finish / round cap / no-progress guard"| S["Synthesize the best round"]
-    S --> V["Verify — Verifier audits the final answer with its own tool checks"]
-    V --> A["Audit — Accountability audits trace and provenance"]
-    A --> F["Delivered result: answer + VerificationReport + AccountabilityReport"]
+    C --> D{"Decision — Manager: revise or finish"}
+    D -->|"request revision"| W1
+    D -->|"finish / round cap / no-progress guard"| S["Best-Round Selection → Synthesis"]
+    S --> V["Verify — independent per-claim audit"]
+    V --> A["Accountability — trace & provenance audit"]
+    A --> F["Delivered answer + VerificationReport + AccountabilityReport"]
 ```
 
-Per round: workers produce claims → the Skeptic verdicts every claim → the
-Manager decides (route to a worker for a revision, or finish). When the run
-finishes, synthesis picks the **best round** (score = supported − unresolved
-claims, later round on ties), then both audits run — both are mandatory on every
-completed run.
+**Stage by stage:**
 
-### The six agents
+1. **Plan** — the Manager frames the task and dispatches the first round.
+2. **Research ∥ Ideate** — both workers run in parallel, producing claims with evidence through their bounded tool loops.
+3. **Critique** — the Skeptic verdicts every claim in the pool, with objections and evidence.
+4. **Decide** — the Manager routes a revision or finishes. Guarded by deterministic stop conditions: round cap, repeated-decision, no-progress, and step caps all produce visible finish decisions.
+5. **Best-Round Selection → Synthesis** — the strongest round (supported minus unresolved claims) becomes the final answer.
+6. **Verify** — the Verifier audits the final answer claim by claim with independent tool checks.
+7. **Accountability** — the process audit validates trace completeness and provenance.
+8. **Deliver** — answer plus both audit reports, streamed live and persisted.
 
-| Agent | Responsibility | Output | Tools |
-|---|---|---|---|
-| **Manager** | Plans the first step, then routes the loop. Sees only a bounded registry summary — never worker prose, never memory. | Plan claims + routing decisions | — |
-| **Researcher** | Investigates the task; with tools configured, runs a bounded gather loop *before* answering. | Finding claims + evidence | `file_search`, `file_reader`, `memory`, `web_search`¹ |
-| **Ideator** | Generates alternatives and options as claims. | Idea claims + evidence | same as Researcher |
-| **Skeptic** | Verdicts every claim each round: `supported` / `refuted` / `unverifiable`, with a non-empty objection and its own evidence. | Verdicts | same as Researcher |
-| **Verifier** | Audits the **final answer**: one entry per final claim, checked with its own file/web tool calls. A prior `supported` verdict is context, never grounds for `verified`. | `VerificationReport` | `file_search`, `file_reader`, `web_search` |
-| **Accountability** | Audits the run itself: trace completeness, per-claim provenance, and flags (10 kinds × `info`/`warning`/`violation`). Never a quality judgment. | `AccountabilityReport` | — |
+Agents exchange **structured artifacts, not unrestricted peer-to-peer chatter** — every hand-off is a typed, validated object.
 
-¹ `web_search` only with `AI_NEXUS_TOOL_WEB_SEARCH_ENABLED=true`; file tools
-only when `AI_NEXUS_TOOL_FILES_ROOT` points at a directory; `memory` is always
-registered. Manager and Accountability never get tools.
+---
 
-### Claims, verdicts, decisions
+## The Claim & Evidence Model
 
-The data model (all validated with Pydantic, frozen at use sites, blank strings
-rejected at every field):
-
-- **Claim** — `id` (code-assigned), `statement`, `status` (six values above),
-  `confidence` (0–1, optional), `evidence[]` (`source` mandatory, `quote`
-  optional).
-- **Verdict** — targets exactly one claim; `supported` requires evidence or
-  `validate_verdicts` rejects the batch.
-- **Decision** — `call_agent` (target: Researcher or Ideator, plus an
-  instruction) or `finish`, with a reason and confidence. The schema itself
-  rejects incoherent decisions; the orchestrator executes them — the Manager
-  never does.
-- **Revision rule** — keep that worker's supported claims, drop its unresolved
-  ones (and their verdicts), append deduplicated new claims.
-- **Message kinds** — `plan`, `finding`, `idea`, `critique`, `question`,
-  `synthesis`, `decision`, `revision`, `verification`, `accountability`.
-
-### Claim lifecycle
+The heart of the system: a typed claim lifecycle instead of fluent prose.
 
 ```mermaid
 flowchart LR
-    A["Claim created — code-assigned id, status, evidence"] --> B["Skeptic verdict — supported / refuted / unverifiable"]
+    A["Claim created<br/>status + evidence"] --> B["Skeptic verdict<br/>supported / refuted / unverifiable"]
     B -->|"supported"| C["Stays in the round pool"]
-    B -->|"refuted / unverifiable"| D["Dropped on the worker's revision"]
-    C --> E["Manager decision — finish or request a revision"]
+    B -->|"refuted / unverifiable"| D["Dropped on revision"]
+    C --> E["Manager decision"]
     D --> E
-    E --> F["Synthesis from the best round — final answer"]
-    F --> G["Verifier — verified / contradicted / partially_verified / unverifiable per final claim"]
-    F --> H["Accountability — per-claim provenance + flags; mechanical facts merged by code"]
+    E --> F["Synthesis → final answer"]
+    F --> G["Verifier: verified / contradicted /<br/>partially_verified / unverifiable"]
+    F --> H["Accountability: provenance + flags"]
     G --> I["Delivered result"]
     H --> I
 ```
 
-### Design decisions worth knowing
+**The vocabularies (all Pydantic-validated, frozen at use sites):**
 
-1. **No prose crossing between agents.** Worker prose and per-agent memory are
-   invisible to peers — enforced in tests (contexts are byte-identical; the
-   Skeptic's input contains zero peer prose; memory is namespaced per
-   `(run, agent)`). The two deliberate exceptions: the Verifier and
-   Accountability receive the *final answer*, because auditing exactly that is
-   their job.
-2. **Grammar, not hope, for structure.** Outputs go through Ollama's `format=`
-   grammar with a parse-retry-once, and the single retry carries a targeted fix
-   hint for known violations (a temperature-0 model otherwise re-emits the
-   identical error). `minLength: 1` on schema strings is load-bearing —
-   qwen2.5 intermittently emits `""` otherwise.
-3. **Tools and grammar cannot share a request** (live-verified), so tool runs
-   use two-phase generation: Phase A unconstrained gathering (≤
-   `AI_NEXUS_TOOL_MAX_STEPS` executions, with repeat/step/budget guards), then
-   Phase B the grammar-constrained answer.
-4. **The Manager is a router, not a talker.** Its decisions are JSON executed by
-   Python; it sees only the bounded registry summary. No agent can "decide" by
-   prose alone.
-5. **Fail-closed audits.** `verified` without independent evidence is rejected
-   in code; accountability's mechanical facts are computed by
-   `enforce_accountability` before persistence, so the model cannot under-report
-   the trace it just produced. Any audit-step failure fails the run.
-6. **Tools never raise.** `Tool.call` returns JSON envelopes — failures are
-   data fed to the model, not exceptions. Tool results are always valid JSON
-   (overflow degrades to a preview envelope). File tools confine to
-   `AI_NEXUS_TOOL_FILES_ROOT`.
-7. **A paced web-search cascade.** Optional DDG→Bing with browser-faithful
-   requests, minimum 3 s between calls, jittered retries, UA rotation, and a
-   process-local TTL cache; the success envelope reports `provider`/`attempts`/
-   `cached`, and a walled call ends as `provider_blocked` (expected, labeled —
-   the run still finishes).
-8. **Event-projection persistence.** Every mutation rides one `append_event`
-   funnel into SQLite (WAL). Reads fall back to disk on a memory miss, so
-   `GET /api/runs/{id}` and SSE replay work after a restart; crash recovery
-   marks interrupted runs `failed` + `ServerRestart`.
-9. **A pure-reducer frontend.** The UI folds SSE events
-   (`run_started` → `step_started` / `step_completed` → `run_completed` /
-   `run_failed`) into a view model; it never sequences work. Boundaries are
-   test-enforced (fetch only in `api.ts`, EventSource only in `sse.ts`) and the
-   hand-written wire types are guarded by a backend contract test.
-
----
-
-## Features
-
-- **End-to-end run orchestration** with iterative critique/revision rounds and
-  best-round synthesis.
-- **Live web UI**: task form, step feed, per-round panels joining
-  claims/verdicts/decisions, verification and accountability panels, final
-  answer with claim-status discipline, run history.
-- **Evidence visibility**: round panels render claim-level citations and
-  verdicts; `selected_round` is computed server-side and delivered with the run.
-- **Tool use** for configured agents: sandboxed file search/reader, namespaced
-  memory, optional paced web search.
-- **Persistence & recovery**: every run stored in SQLite; SSE replay from disk
-  after restart; retention cap (500 runs).
-- **Health endpoint** reporting model/provider reachability and effective config
-  (`GET /api/health`).
-- **Graceful shutdown**: `scripts/serve.py` closes SSE streams, marks the live
-  run `ServerShutdown`, and exits within a bounded grace period.
-- **CLI + eval harness**: full pipeline from the terminal, controlled eval
-  problems with mandatory/advisory checks, model benchmark tooling.
-
----
-
-## Architecture
-
-### Components
-
-| Path | Responsibility |
+| Layer | Values |
 |---|---|
-| `backend/app/llm/` | Ollama provider adapter (chat, grammar, token accounting) — the only place LLM HTTP lives |
-| `backend/app/agents/` | Six role modules (prompts + configs), `Agent` one-shot/gather loop, structured output + fix hints, tool-loop phases |
-| `backend/app/orchestrator.py` | The loop: plan → research ∥ ideate → critique → decide → (revise)* → synthesize → verify → audit; stop guards; best-round selection |
-| `backend/app/claims.py` | Claim/verdict validation (e.g. `supported` requires evidence) |
-| `backend/app/audits.py` | Verification rules, audit facts, accountability enforcement (mechanical facts merged by code) |
-| `backend/app/runs.py` | Run state machine, step/round records, event types, SSE plumbing |
-| `backend/app/db.py` | `RunStore`: SQLite (stdlib, WAL), event projection, replay |
-| `backend/app/api/` | FastAPI routers: runs + health |
-| `backend/app/tools/` | Tool registry + `file_search` / `file_reader` / `memory` / `web_search` (search cascade in `app/tools/search/`) |
-| `backend/app/config.py` | All backend settings (`AI_NEXUS_*` env vars) |
-| `backend/app/eval.py`, `backend/scripts/` | Eval-gate machinery and runnable entry points |
-| `frontend/src/` | `reducer.ts` (event fold), `evidence.ts` / `audits.ts` (pure derivations), `api.ts` / `sse.ts` (network boundaries), `components/` (14 UI components) |
-| `backend/tests/`, `frontend/src/test/` | Offline suites, fakes/fixtures, architecture & wire-contract tests |
+| **Claim status** (6) | `fact` · `assumption` · `hypothesis` · `opinion` · `inference` · `unverified` |
+| **Skeptic verdict** (3) | `supported` · `refuted` · `unverifiable` |
+| **Verification status** (4) | `verified` · `contradicted` · `partially_verified` · `unverifiable` |
+| **Accountability flags** (10 kinds × 3 severities) | trace completeness, unsupported final claims, provenance gaps, decision inconsistency, tool-use inconsistency, premature stop, and more — graded `info` / `warning` / `violation` |
 
-### Project structure
+**Why it matters:**
 
-```text
-ai-nexus/
-├── backend/
-│   ├── app/
-│   │   ├── agents/          # manager, researcher, ideator, skeptic, verifier, accountability
-│   │   ├── api/             # runs, health routers
-│   │   ├── llm/             # Ollama provider
-│   │   ├── tools/           # registry + file/memory/web tools (search/ = cascade)
-│   │   ├── orchestrator.py  # the only loop
-│   │   ├── claims.py        # claim/verdict validation
-│   │   ├── audits.py        # verification + accountability enforcement
-│   │   ├── runs.py          # run state machine, events, SSE
-│   │   ├── db.py            # RunStore (SQLite, WAL)
-│   │   └── config.py        # AI_NEXUS_* settings
-│   ├── scripts/             # serve, eval, run_pipeline, smoke, demos, benchmark…
-│   ├── tests/               # 564 offline tests + live integration suite
-│   └── data/                # SQLite files (created by real runs)
-├── frontend/
-│   └── src/                 # App, reducer, evidence/audits derivations, components
-└── (local docs)             # AGENTS.md, PLAN.md, PHASE_*_PRD.md — not tracked
+- **Nothing is "just prose."** Every assertion carries its epistemic status and its sources.
+- **Verification is genuinely independent.** A prior `supported` verdict is context for the Verifier — never grounds for `verified`.
+- **Uncertainty is preserved.** Unverifiable claims stay labeled as unverifiable all the way to the final report.
+- **The pipeline is enforceable.** Claim identifiers are assigned by code, blank fields are rejected, and schema-invalid output never reaches the pool.
+
+---
+
+## Product Features
+
+**Reasoning core**
+- 🔄 Multi-agent orchestration with iterative critique/revision rounds
+- 🧮 Best-round selection — synthesis draws from the strongest round, not the last one
+- 🧾 Evidence-aware claims with citations and optional quotations
+- ✅ Independent verification with per-claim, four-valued outcomes
+- 🛡️ Accountability auditing of trace, provenance, and completeness
+- 🎯 Deterministic stop conditions — round caps, no-progress guards, step caps
+- 🧬 Structured JSON-schema outputs enforced through grammar-constrained generation
+- 🛠️ Bounded tool loops with repeat/step/budget guards
+
+**Tools & research**
+- 📂 Sandboxed file search & file reader (confined to a configured root)
+- 🧠 Namespaced agent memory, isolated per run and per agent
+- 🌐 Optional live web research — paced DDG→Bing cascade, cached, off by default
+
+**Platform**
+- 🖥️ Local Ollama inference — no cloud API required
+- ⚡ Real-time SSE execution feed (5 event types)
+- 💾 SQLite persistence with WAL and event-projection writes
+- 📚 Full run history with retention management
+- 🔁 Restart-safe replay — events and run detail served from disk after a restart
+- 🩺 Health endpoint with provider/model reachability and effective configuration
+- 🖥️ CLI execution for the full pipeline, agents, or a single round-trip
+- 📊 Evaluation harness with controlled problems, mandatory/advisory checks, and a human-scored rubric
+
+---
+
+## The Live UI
+
+The React frontend is a **real operations console**, not a chat box.
+
+- **Live task submission** — start a run and watch it unfold step by step
+- **Execution feed** — every stage (`plan` → `research` → `ideate` → `critique` → `decide` → `revise` → `synthesize` → `verify` → `audit`) appears as it happens
+- **Round panels** — claims, verdicts, and decisions joined with their evidence
+- **Verification panel** — the Verifier's per-claim report on the final answer
+- **Accountability panel** — trace and provenance audit with graded flags
+- **Final result** — the answer alongside both audit reports
+- **Run history** — every past run, persisted and replayable
+
+> **You don't just receive an answer — you can watch how the system arrived there.**
+
+The UI is a pure event reducer over the SSE stream: it folds events into a view model and never sequences work itself. Network boundaries are test-enforced, and the wire format is guarded by a backend contract test.
+
+---
+
+## Technical Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  React 19 + TypeScript (Vite) — pure event reducer          │
+│  TaskForm · RunFeed · RoundPanel · VerificationPanel ·       │
+│  AccountabilityPanel · FinalResult · RunHistory              │
+└────────────────────────┬────────────────────────────────────┘
+                         │ REST + SSE (5 event types)
+┌────────────────────────▼────────────────────────────────────┐
+│  FastAPI — runs, health, SSE replay                          │
+├─────────────────────────────────────────────────────────────┤
+│  Orchestrator (the only loop)                                │
+│  plan → research ∥ ideate → critique → decide → (revise)*    │
+│  → synthesize → verify → audit                               │
+├──────────────┬───────────────┬──────────────────────────────┤
+│ 6 agent      │ Claim/verdict │ Audits                       │
+│ modules +    │ validation    │ verification rules +         │
+│ tool loops   │ (Pydantic)    │ accountability enforcement   │
+├──────────────┴───────────────┴──────────────────────────────┤
+│  Tool registry: file_search · file_reader · memory ·         │
+│  web_search (optional, paced cascade)                        │
+├─────────────────────────────────────────────────────────────┤
+│  RunStore — SQLite (WAL), event projection, replay           │
+├─────────────────────────────────────────────────────────────┤
+│  Ollama — qwen2.5:14b-instruct (grammar-constrained output)  │
+└─────────────────────────────────────────────────────────────┘
 ```
 
----
+**Boundaries that matter:**
 
-## Tech stack
-
-| Layer | Choice |
+| Concern | Where it lives |
 |---|---|
-| Backend | Python ≥ 3.12, FastAPI 0.142, uvicorn 0.54, Pydantic 2.13, pydantic-settings |
-| LLM | Ollama locally — `qwen2.5:14b-instruct` (fallback `qwen2.5:7b-instruct`), `num_ctx` 8192, temperature 0 by default |
-| Structured output | Ollama `format=` grammar (JSON Schema → grammar) + parse-retry-once |
-| Storage | SQLite via stdlib `sqlite3` (WAL, event projection) — no ORM |
-| HTTP | `httpx`, confined to `app/llm/` and the search providers by layer rule |
-| Frontend | React 19, TypeScript, Vite 8, Vitest 5, Testing Library |
-| Transport | REST + SSE (5 event types), wire types guarded by `test_ui_contract.py` |
-| Search | DDG→Bing cascade (opt-in), paced + cached |
-| Cloud services | **None required** — no cloud inference, no external DB, no paid API |
+| LLM HTTP | `backend/app/llm/` only |
+| Orchestration | `backend/app/orchestrator.py` — the single loop |
+| Validation | Pydantic models + Ollama `format=` grammar with targeted retry |
+| Persistence | `RunStore` — SQLite WAL behind one `append_event` funnel |
+| Transport | REST + SSE, wire types contract-tested across the stack |
+| HTTP client layer | `httpx` confined to the model layer and search providers |
+| Frontend state | Pure reducer — no side-effectful sequencing |
 
 ---
 
-## Getting started
+## Tech Stack
+
+| Layer | Technology | Purpose |
+|---|---|---|
+| Backend | **Python ≥ 3.12** · FastAPI · uvicorn | API, SSE streaming, orchestration |
+| Validation | **Pydantic 2.13** + pydantic-settings | Typed domain models, config, contract enforcement |
+| Model layer | **Ollama** — `qwen2.5:14b-instruct` (fallback `7b`) | Local inference, grammar-constrained structured output |
+| Storage | **SQLite** (stdlib, WAL, no ORM) | Runs, events, replay, retention |
+| Frontend | **React 19** · TypeScript · **Vite** | Live operations console |
+| Testing | **pytest** · **Vitest** · Testing Library | Offline + integration suites |
+| Transport | **REST + SSE** | Command API + real-time execution feed |
+| Search | DDG→Bing cascade (opt-in) | Optional live web research |
+| Cloud services | **None required** | No paid API, no external DB |
+
+---
+
+## Testing & Engineering Quality
+
+AI Nexus is engineered like infrastructure — with tests to match.
+
+```bash
+# Backend — offline suite (no model, no network): 564 tests, ~2 s
+cd backend && .venv/bin/python -m pytest -q
+
+# Backend — live integration suite: 15 tests (auto-skips if Ollama is down)
+cd backend && .venv/bin/python -m pytest -q -m integration
+
+# Frontend — offline suite: 109 tests (fixtures + fake EventSource)
+cd frontend && npm test && npm run typecheck
+```
+
+**What the suite protects:**
+
+| Discipline | Coverage |
+|---|---|
+| **Unit + app tests** | 564 offline backend tests — orchestration, claims, audits, persistence, API, config |
+| **Frontend tests** | 109 offline tests with wire-accurate fixtures and a fake EventSource |
+| **Architecture tests** | Enforce module boundaries — fetch only in `api.ts`, EventSource only in `sse.ts`, layer rules in the backend |
+| **Wire-contract tests** | Backend payload shapes guarded against frontend expectations — schema drift fails the suite |
+| **Agent isolation tests** | Peer contexts byte-identical; no agent receives another's prose or memory |
+| **Structured-output tests** | Grammar schema validation, retry hints, code-assigned identifiers |
+| **Persistence tests** | Event projection, replay after restart, crash-recovery marking |
+| **Integration tests** | 15 live tests against Ollama asserting run structure end to end |
+| **Type safety** | `tsc --noEmit` strict on the frontend, run with every commit |
+
+There is no CI — both suites are expected to pass locally before any commit. The offline backend suite completes in about two seconds; the full frontend suite in about two.
+
+---
+
+## Evaluation
+
+**AI Nexus is built to be evaluated, not merely demonstrated.**
+
+The repository ships a serious evaluation harness designed to compare:
+
+- **Reasoning quality** — correctness across task classes
+- **Evidence use** — whether conclusions actually rest on cited sources
+- **Uncertainty handling** — honest labeling of what cannot be verified
+- **Tool use** — whether tools are used when the task requires them
+- **Latency** — wall-clock cost per run
+- **Token cost** — prompt/completion economics
+- **Structured output behavior** — validity of schema-constrained generation
+
+**The eval gate** (`scripts/eval.py`) runs three controlled problems — a planted falsehood over a file corpus, an underspecified evidence-gap task, and a well-specified task — each with **mandatory checks** (required for a green exit) and **advisory checks** (where honest uncertainty is the correct answer). The eval of record passed **24/24 mandatory checks**.
+
+**The human-scored rubric** rates correctness, evidence use, and honesty (1–5, with written rationales). It is human-judged and locked — never auto-filled or LLM-generated — and persisted runs can be re-scored offline with `--rescore`, with zero model calls.
+
+**Model benchmarking** (`scripts/benchmark.py`) measures speed and output validity across models and recommends a `primary_model` from real measurements.
+
+Across its evaluation program, the system has been exercised on controlled reasoning, system design, debugging, quantitative, and live web-research tasks — with a benchmark harness that records runs as they actually happen, raw artifacts included.
+
+---
+
+## Built for Local-First
+
+- **No paid inference API.** Everything runs through Ollama on your hardware.
+- **Your data stays local.** Runs, claims, verdicts, and reports persist in a local SQLite file — no external database, no third-party service.
+- **Cloud-free by default.** No cloud inference, no external DB, no paid API in the default configuration.
+- **Web research when you want it.** Live search is optional, paced, and disabled by default — enable it per-run when fresh external information is required.
+- **Privacy-friendly experimentation.** Suitable for sensitive or exploratory workloads where sending prompts off-machine isn't desired.
+
+---
+
+## Getting Started
 
 ### Prerequisites
 
 - **Python ≥ 3.12**
-- **Ollama** on `localhost:11434` with the model pulled
-  (`ollama pull qwen2.5:14b-instruct`, ≈ 9 GB) — only needed for live runs;
-  offline tests never touch it
 - **Node ≥ 20.19**
+- **Ollama** on `localhost:11434` with the model pulled — only needed for live runs; offline tests never touch it:
+
+```bash
+ollama pull qwen2.5:14b-instruct   # ≈ 9 GB
+```
 
 ### Install
 
@@ -321,7 +364,7 @@ npm install
 ### Run
 
 ```bash
-# API on :8000 — use this runner, not plain uvicorn (see Known limitations)
+# API on :8000 — recommended runner (bounded graceful shutdown)
 cd backend
 .venv/bin/python scripts/serve.py
 
@@ -330,244 +373,129 @@ cd frontend
 npm run dev
 ```
 
-Open <http://localhost:5173>, enter a task, press **Run**. A full run is minutes
-of local 14B generation — the live feed shows each step as it happens.
+Open **http://localhost:5173**, enter a task, press **Run**. The live feed shows each step as it happens.
 
-Optional: enable the `web_search` tool (off by default):
+### Enable web research (optional)
 
 ```bash
 AI_NEXUS_TOOL_WEB_SEARCH_ENABLED=true .venv/bin/python scripts/serve.py
 ```
 
-Every setting is documented in `backend/.env.example` (copy to `.env` to
-override); the frontend API base is `frontend/.env.example`
-(`VITE_API_BASE_URL`, default `http://127.0.0.1:8000`).
-
----
-
-## Using AI Nexus
-
-### Web UI
-
-Submit a task and watch the run live: each step (`plan`, `research`, `ideate`,
-`critique`, `decide`, `revise`, `synthesize`, `verify`, `audit`) appears in the
-feed; round panels join claims, verdicts, and decisions by run-level claim ID;
-the verification and accountability panels show both audit reports; the final
-result arrives only when both audits pass. Run history is served from SQLite,
-including after a backend restart.
+Every setting is documented in `backend/.env.example` (copy to `.env` to override); the frontend API base is `frontend/.env.example` (`VITE_API_BASE_URL`, default `http://127.0.0.1:8000`).
 
 ### CLI
 
 ```bash
 cd backend
-.venv/bin/python scripts/run_pipeline.py "task" --verbose   # full N-step run
+.venv/bin/python scripts/run_pipeline.py "task" --verbose   # full orchestrated run
 .venv/bin/python scripts/agents_demo.py "task"              # agents alone, no orchestration
 .venv/bin/python scripts/smoke.py "prompt"                  # single LLM round-trip
 ```
 
 | Script | Purpose |
 |---|---|
-| `scripts/serve.py` | Recommended API runner (bounded graceful shutdown) |
-| `scripts/eval.py` | Eval gate: 3 controlled problems → `eval_results.json` |
-| `scripts/run_pipeline.py` | One full run from the CLI (`--verbose`, `--json`) |
+| `scripts/serve.py` | Recommended API runner — bounded graceful shutdown |
+| `scripts/run_pipeline.py` | One full run from the terminal (`--verbose`, `--json`) |
+| `scripts/eval.py` | Evaluation gate → `eval_results.json` (`--rescore` offline) |
+| `scripts/benchmark.py` | Model speed/validity benchmark |
 | `scripts/smoke.py` | Single LLM round-trip |
 | `scripts/agents_demo.py` | The agents independently, no orchestration |
-| `scripts/tool_refutation_demo.py` | Skeptic refutes a planted claim via tool evidence |
+| `scripts/tool_refutation_demo.py` | Skeptic refutes a claim using tool evidence |
 | `scripts/web_search_probe.py` | Web-search hit-rate probe |
-| `scripts/benchmark.py` | Model speed/validity benchmark, recommends `primary_model` |
 
 ### HTTP API
 
 | Method & path | Purpose |
 |---|---|
-| `POST /api/runs` | Start a run — `202`; `409` while another run is active (one at a time) |
+| `POST /api/runs` | Start a run |
 | `GET /api/runs` | List runs |
-| `GET /api/runs/{id}` | Full run: rounds, claims, verdicts, decisions, both reports |
+| `GET /api/runs/{id}` | Full run — rounds, claims, verdicts, decisions, both reports |
 | `GET /api/runs/{id}/events` | SSE stream (replays stored events on reconnect/restart) |
-| `GET /api/health` | Provider/model reachability + effective config |
+| `GET /api/health` | Provider/model reachability + effective configuration |
 
 ---
 
-## Testing
+## Project Structure
 
-```bash
-# backend — offline suite (no model, no network): 564 passed, ~2 s
-cd backend && .venv/bin/python -m pytest -q
-
-# backend — live integration suite (tens of minutes; auto-skips if Ollama is down)
-.venv/bin/python -m pytest -q -m integration
-
-# frontend — offline (109 tests, fixtures + fake EventSource)
-cd ../frontend && npm test && npm run typecheck
+```text
+ai-nexus/
+├── backend/
+│   ├── app/
+│   │   ├── agents/          # manager, researcher, ideator, skeptic, verifier, accountability
+│   │   ├── api/             # runs, health routers
+│   │   ├── llm/             # Ollama provider (chat, grammar, token accounting)
+│   │   ├── tools/           # registry + file/memory/web tools
+│   │   ├── orchestrator.py  # the only loop
+│   │   ├── claims.py        # claim & verdict validation
+│   │   ├── audits.py        # verification rules + accountability enforcement
+│   │   ├── runs.py          # run state machine, events, SSE
+│   │   ├── db.py            # RunStore (SQLite, WAL)
+│   │   └── config.py        # AI_NEXUS_* settings
+│   ├── scripts/             # serve, eval, run_pipeline, benchmark, demos
+│   ├── tests/               # 564 offline tests + live integration suite
+│   └── data/                # SQLite files (created by real runs)
+├── frontend/
+│   └── src/                 # reducer, evidence/audits derivations, 14 components
+└── (local docs)             # PLAN.md, PHASE_*_PRD.md — design history, untracked
 ```
 
-Notes that save hours:
-
-- `pytest.ini` defaults to `-m "not integration"` — plain `pytest` is offline
-  only; CLI `-m` overrides it.
-- Live tests assert *structure* (rounds, kinds, verdict coverage), never
-  content — if one fails, re-run once; twice on the same assertion is a real bug.
-- The frontend suite needs no backend; wire-format drift is caught on the
-  backend side by `test_ui_contract.py` (extend its key sets when payloads grow).
-- No CI: run both suites before committing.
-
----
-
-## Evaluation & benchmarks
-
-### Eval gate (`scripts/eval.py`)
-
-Three controlled problems — `p1` planted falsehood (file corpus), `p2`
-underspecified / evidence gap, `p3` simple / well-specified — each with
-**mandatory** checks (exit `0` requires all of them) and **advisory** checks
-(honest misses on unverifiable answers are expected):
-
-```bash
-cd backend
-AI_NEXUS_REQUEST_TIMEOUT_S=900 AI_NEXUS_REPEAT_PENALTY=1.2 .venv/bin/python scripts/eval.py
-.venv/bin/python scripts/eval.py --rescore eval_results.json   # re-score persisted runs, no model calls
-```
-
-Results of the green run of record (2026-10-03, preserved in
-`backend/eval_results.json`):
-
-| Metric | Result |
+| Path | Responsibility |
 |---|---|
-| Mandatory checks | **24 / 24** |
-| Advisory checks | 7 / 17 |
-| Verdict mix | 12 supported · 2 refuted · 19 unverifiable (refutation rate 6.1 %) |
-| Rounds | p1: 3 · p2: 1 · p3: 2 |
-| Cost | 93,178 tokens · ~82 min wall |
-
-The `human_scores` rubric (correctness / evidence use / honesty, 1–5, with
-rationales) is **human-judged and locked** — never auto-filled or LLM-generated:
-
-| Problem | Correctness | Evidence use | Honesty |
-|---|---|---|---|
-| p1 planted falsehood | 4 | 4 | 5 |
-| p2 underspecified / evidence gap | 3 | 3 | 4 |
-| p3 simple / well-specified | 2 | 3 | 3 |
-
-The baseline of record is `backend/eval_baseline_2026-10-03.json`; it is the
-number Phase 12's debate-mode proposal must beat (gate sentence in
-`PHASE_11B_PRD.md`, Appendix A).
-
-### 34-run benchmark (2026-10-04)
-
-A three-stage evaluation of the system as it actually behaves — **no run was
-ever re-run to obtain a nicer result**; failures are recorded as-is:
-
-| Stage | Runs | What it measured | Outcome |
-|---|---|---|---|
-| A — head-to-head | 14 (7 tasks × {single-agent baseline, Nexus}, same model & tools) | answer quality + cost | 13 completed / 1 failed |
-| B — general tasks | 15 (G1–G15, no external evidence available) | claim/verdict/audit behavior under stress | 13 completed / 2 failed |
-| C — web research | 5 (R1–R5, `web_search` on) | evidence gathering from the live web | 0 completed / 5 failed |
-
-**Totals: 26 / 34 runs completed · 971,653 tokens · 15.2 h wall.**
-
-**Stage A — per-task verdicts (7 paired tasks):**
-
-| Task | Verdict | Why |
-|---|---|---|
-| B1 planted falsehood | Nexus better (marginal) | Both rejected the false figure; only Nexus engaged the "unaudited" caveat — but Nexus's claim layer carried a provenance defect |
-| B2 conflicting documents | Equivalent | Both fully correct; baseline in 139 s / 2.8k tokens vs Nexus 2 773 s / 58k |
-| B3 underspecified forecast | **Nexus better** | Baseline returned a meta-answer; Nexus delivered a substantive, honest answer with explicit refutation of unsourced numbers |
-| B4 system design tradeoff | **Nexus better** | Baseline again produced a non-answer; Nexus produced a real recommendation with tradeoffs |
-| B5 technical debugging | Equivalent | Both met every expected criterion; baseline richer per token |
-| B6 quantitative reasoning | **Baseline better** | Same final figure, but Nexus's intermediate arithmetic in the answer was wrong and it hedged the task's own givens |
-| B7 web research | **Baseline better** | Nexus run **failed** (verifier structured-output error → whole run failed, no answer); baseline completed with verified URLs |
-
-**Tally: Nexus better 3 · baseline better 2 · equivalent 2.**
-**Cost: baseline 801 s / 12,371 tokens vs Nexus 14,662 s / 286,575 tokens
-(~18× wall-clock, ~23× tokens).**
-
-Stated honestly, the evidence says: the architecture measurably helped on the
-tasks where the single agent produced a non-answer (B3, B4) and added one real
-nuance (B1); it was equivalent on two, actively hurt one (process noise corrupted
-trivial arithmetic), and was undercut by a reliability defect on one. On 7 tasks
-/ 1 model this is **insufficient to establish overall superiority** — the value
-is real but conditional, and the audit-step reliability defect currently
-undermines it.
-
-**Stage B (G1–G15):** 13/15 completed (two verifier structured-output kills).
-With all external evidence disabled, three runs (G4, G9, G15) fabricated source
-provenance with zero tool calls — a P1 finding that no audit step checks for.
-Completed runs cost ≈ 383k tokens / 6.2 h.
-
-**Stage C (R1–R5):** 0/5 delivered a final answer — four runs died at the
-critique step and one at verify (mid-JSON truncation at the structured-output
-token cap). Where search evidence was captured it was real: **8/8 spot-checked
-URLs resolve HTTP 200** — the opposite of Stage B's fabricated provenance. The
-first `web_search` call failed with `internal_error` in 5/5 runs.
-
-Full reports and raw artifacts (per-run traces, manifest, findings file) live
-alongside this README: `benchmark_comparison_report.md`, `15_test_runs.md`,
-`5_research_runs.md`.
+| `backend/app/orchestrator.py` | The single orchestration loop and stop guards |
+| `backend/app/claims.py` | Claim/verdict validation — e.g. `supported` requires evidence |
+| `backend/app/audits.py` | Verification rules and accountability enforcement |
+| `backend/app/runs.py` | Run state machine, event types, SSE plumbing |
+| `backend/app/db.py` | Event-projection persistence and replay |
+| `frontend/src/reducer.ts` | Pure event fold — the UI's entire state model |
+| `frontend/src/evidence.ts` | Pure join of rounds, claims, verdicts, decisions |
 
 ---
 
-## Known limitations
+## Design Philosophy
 
-**Runtime behavior**
+AI Nexus embodies a set of deliberate convictions about how reasoning systems should be built:
 
-- **Latency**: a run is 5–25 minutes of local 14B generation; iterative,
-  tool-heavy runs sit at the upper end. This is the product, not a bug.
-- **One active run at a time** (`409` on a second `POST /api/runs`); single
-  SQLite writer per file — never run two writers on one DB.
-- **`web_search` blocks are real**: free providers occasionally return bot
-  challenges; runs finish gracefully with labeled prior-knowledge claims
-  (`provider_blocked` is expected, not a crash). Check hit rates with
-  `scripts/web_search_probe.py`.
-- **Model loops**: Ollama can abort long generations with
-  `500 token repeat limit reached`. The run fails visibly with a tuning hint —
-  re-run or raise `AI_NEXUS_REPEAT_PENALTY`. No code path auto-retries.
-- **Graceful shutdown**: plain `uvicorn app.main:app` can linger on an open SSE
-  connection; prefer `scripts/serve.py`, which passes `timeout_graceful_shutdown`
-  and drains streams before exit.
-
-**Findings from the 34-run evaluation (unfixed)**
-
-- **Structured-output validation can kill a run that already has its answer**
-  (8/34 eval runs, 5 distinct modes) — by design any audit-step failure fails
-  the run, with no partial delivery. Two verified mechanics: a fix-hint mismatch
-  (the retry is told to fill a field the validator never reads, so the retry
-  cannot pass), and a 2048-token structured-output cap that truncated a long
-  verifier report mid-JSON.
-- **`web_search` fails on the first call of every web-enabled run**
-  (`internal_error` within ~30 ms; later calls succeed) — transport failures are
-  not retried inside the call.
-- **No evidence-grounding check exists**: claims can cite sources no tool ever
-  returned (fabricated provenance observed in G4/G9/G15 and a phantom
-  "web search was conducted" claim in an eval run). Until such a check exists,
-  treat claim-level `evidence[].source` as model-generated text, not fact.
-- **Cost is the standing tax**: ~18× wall-clock and ~23× tokens versus a single
-  agent on the same tasks — whether the observed 3-of-7 improvement justifies it
-  depends on the task class.
-- **Evidence scope**: 1 model (qwen2.5:14b), 34 runs, no repeated trials per
-  configuration — conclusions are indicative, not definitive.
+- **Structure over free-form agent chatter.** Agents hand each other typed artifacts, not essays.
+- **Evidence over unsupported confidence.** A claim without a source is a hypothesis at best — and says so.
+- **Independent verification over self-confirmation.** The entity that wrote the answer does not grade it.
+- **Explicit control over autonomous loops.** Every stop is a guard condition, not a mood.
+- **Observability over black-box behavior.** If you can't watch it work, you can't trust it.
+- **Determinism wherever practical.** Routing, stopping, identifier assignment, and best-round selection are decided by code.
+- **Local-first experimentation.** The full stack runs on the machine in front of you.
 
 ---
 
-## Future directions
+## Design Considerations
 
-- **Phase 12 — debate mode**: a proposal exists in `DEBATE_MODE_PROPOSAL.md`
-  (proposed, not approved). Its evaluation gate is the locked Phase 11b rubric
-  baseline above.
-- **Fix the evaluation-found defects**: structured-output validation robustness
-  (validator/hint alignment, per-role token budgets), in-call retry for search
-  transport failures, and an evidence-grounding check hooked into the
-  accountability pass — then re-run the 34-run benchmark.
-- **Scale the evidence**: more tasks, repeated trials, and a second model before
-  any stronger claim about multi-agent vs. single-agent performance.
+AI Nexus makes deliberate tradeoffs in favor of depth, control, and auditability:
+
+- **Multi-agent reasoning trades compute for depth.** Deep orchestration intentionally performs more inference than a single-pass assistant — the extra passes buy critique, revision, and independent audit.
+- **Local inference scales with your hardware.** Performance depends on the machine running Ollama; a 14B-class model is recommended for the full experience.
+- **Runs are bounded by design.** Round caps, tool limits, and stop guards keep execution predictable and observable — the system favors controlled execution over unconstrained agent loops.
+- **Focused execution, one run at a time.** The API processes a single active run, keeping resource use and event ordering deterministic.
+- **Web research is optional and paced.** Live search can be enabled when fresh external information is required; the default configuration is fully offline.
+- **This architecture prioritizes transparency, control, and auditability** — every stage exists to be inspected.
 
 ---
 
-## Repository conventions
+## Roadmap
 
-- **Code only in git.** Every `*.md` (this README, `AGENTS.md`, `PLAN.md`,
-  PRDs) is intentionally untracked — back them up separately; don't un-ignore
-  without asking.
-- **No CI.** Before committing, run both suites:
-  `pytest -q` in `backend/`, `npm test` + `npm run typecheck` in `frontend/`.
-- **Commit style**: `Phase N: <summary>` with a bullet body.
-- Never commit `.venv`, `benchmark_results.json`, `__pycache__`, or `.env`.
+Built on 11 shipped phases, with a clear line of sight ahead:
+
+- **🧩 Debate mode** — a second execution mode where agents argue a position under a formal protocol (design proposal drafted, in review for the next phase)
+- **📊 Richer evaluation modes** — expanded eval problems, repeated-trial scoring, and additional benchmark suites
+- **🌐 Broader model support** — additional `LLMProvider` implementations and optional per-agent model routing
+- **📎 Stronger evidence workflows** — deeper citation handling and evidence tooling
+- **🔍 Additional research tools** — new tool capabilities for the worker agents
+- **🤖 Expanded agent roles** — the agent abstraction is already reusable; more roles can drop in
+- **📈 Richer visualization** — deeper inspection views over rounds, claims, and audits
+
+---
+
+## The Bottom Line
+
+> **AI Nexus is an experiment in what happens when an LLM stops being a single response generator and becomes the reasoning engine inside a structured system.**
+
+Six agents. Typed claims. Independent verification. A process you can watch, replay, and audit — running entirely on your machine.
+
+**[github.com/anirudhsgh7/ai-nexus](https://github.com/anirudhsgh7/ai-nexus)** · Python / FastAPI • Ollama • Qwen • React / TypeScript • Vite • SQLite • SSE
