@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     tool_result_max_chars: int = Field(default=2000, ge=200, le=8000)
     tool_results_budget_chars: int = Field(default=6000, ge=1000, le=24000)
     tool_files_root: str = ""           # empty = file tools disabled
-    tool_web_search_enabled: bool = False
+    tool_web_search_enabled: bool = True
     tool_web_search_max_results: int = Field(default=5, ge=1, le=10)
     # Phase 8b: reliability settings behind the same flag.
     tool_web_search_providers: list[str] = Field(

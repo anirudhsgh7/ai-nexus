@@ -79,7 +79,7 @@ Six agents, three tiers of responsibility — a control plane, two workers, and 
 | Agent | Role | What it contributes |
 |---|---|---|
 | **Manager** | The control plane. Plans the workflow, evaluates progress, and routes revisions through explicit JSON decisions executed by Python. | Routing decisions, final synthesis |
-| **Researcher** | The investigator. Gathers evidence through the configured tool set before answering — files, memory, and optional live web search. | Finding claims with cited evidence |
+| **Researcher** | The investigator. Gathers evidence through the configured tool set before answering — files, memory, and live web search. | Finding claims with cited evidence |
 | **Ideator** | The explorer. Generates alternatives, hypotheses, and solution paths the task might otherwise never reach. | Idea claims with cited evidence |
 | **Skeptic** | The critic. Issues a verdict on every claim each round — supported, refuted, or unverifiable — with a mandatory objection and its own evidence. | Per-claim verdicts |
 | **Verifier** | The independent auditor. Re-checks every claim in the final answer using its own tool calls, producing a four-valued verification report. | `VerificationReport` |
@@ -178,7 +178,7 @@ flowchart LR
 **Tools & research**
 - 📂 Sandboxed file search & file reader (confined to a configured root)
 - 🧠 Namespaced agent memory, isolated per run and per agent
-- 🌐 Optional live web research — paced DDG→Bing cascade, cached, off by default
+- 🌐 Built-in live web research — paced DDG→Bing cascade, cached, enabled by default
 
 **Platform**
 - 🖥️ Local Ollama inference — no cloud API required
@@ -231,7 +231,7 @@ The UI is a pure event reducer over the SSE stream: it folds events into a view 
 │ tool loops   │ (Pydantic)    │ accountability enforcement   │
 ├──────────────┴───────────────┴──────────────────────────────┤
 │  Tool registry: file_search · file_reader · memory ·         │
-│  web_search (optional, paced cascade)                        │
+│  web_search (on by default, paced cascade)                   │
 ├─────────────────────────────────────────────────────────────┤
 │  RunStore — SQLite (WAL), event projection, replay           │
 ├─────────────────────────────────────────────────────────────┤
@@ -264,7 +264,7 @@ The UI is a pure event reducer over the SSE stream: it folds events into a view 
 | Frontend | **React 19** · TypeScript · **Vite** | Live operations console |
 | Testing | **pytest** · **Vitest** · Testing Library | Offline + integration suites |
 | Transport | **REST + SSE** | Command API + real-time execution feed |
-| Search | DDG→Bing cascade (opt-in) | Optional live web research |
+| Search | DDG→Bing cascade (on by default) | Live web research, paced + cached |
 | Cloud services | **None required** | No paid API, no external DB |
 
 ---
@@ -331,7 +331,7 @@ Across its evaluation program, the system has been exercised on controlled reaso
 - **No paid inference API.** Everything runs through Ollama on your hardware.
 - **Your data stays local.** Runs, claims, verdicts, and reports persist in a local SQLite file — no external database, no third-party service.
 - **Cloud-free by default.** No cloud inference, no external DB, no paid API in the default configuration.
-- **Web research when you want it.** Live search is optional, paced, and disabled by default — enable it per-run when fresh external information is required.
+- **Web research built in.** Live search runs through a paced, cached DDG→Bing cascade by default — set `AI_NEXUS_TOOL_WEB_SEARCH_ENABLED=false` for a fully offline run.
 - **Privacy-friendly experimentation.** Suitable for sensitive or exploratory workloads where sending prompts off-machine isn't desired.
 
 ---
@@ -375,10 +375,12 @@ npm run dev
 
 Open **http://localhost:5173**, enter a task, press **Run**. The live feed shows each step as it happens.
 
-### Enable web research (optional)
+### Web search (on by default)
+
+Live web research is enabled out of the box — no flags needed. To run fully offline instead:
 
 ```bash
-AI_NEXUS_TOOL_WEB_SEARCH_ENABLED=true .venv/bin/python scripts/serve.py
+AI_NEXUS_TOOL_WEB_SEARCH_ENABLED=false .venv/bin/python scripts/serve.py
 ```
 
 Every setting is documented in `backend/.env.example` (copy to `.env` to override); the frontend API base is `frontend/.env.example` (`VITE_API_BASE_URL`, default `http://127.0.0.1:8000`).
@@ -473,7 +475,7 @@ AI Nexus makes deliberate tradeoffs in favor of depth, control, and auditability
 - **Local inference scales with your hardware.** Performance depends on the machine running Ollama; a 14B-class model is recommended for the full experience.
 - **Runs are bounded by design.** Round caps, tool limits, and stop guards keep execution predictable and observable — the system favors controlled execution over unconstrained agent loops.
 - **Focused execution, one run at a time.** The API processes a single active run, keeping resource use and event ordering deterministic.
-- **Web research is optional and paced.** Live search can be enabled when fresh external information is required; the default configuration is fully offline.
+- **Web research is on by default and paced.** Search calls are rate-limited and cached; disable the flag for a fully offline configuration when you don't need fresh external information.
 - **This architecture prioritizes transparency, control, and auditability** — every stage exists to be inspected.
 
 ---

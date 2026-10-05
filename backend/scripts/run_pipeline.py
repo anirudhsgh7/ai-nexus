@@ -7,7 +7,8 @@ Usage (from backend/):
   python scripts/run_pipeline.py "..." --json        # NDJSON RunEvents
 
 Tools are configured via AI_NEXUS_TOOL_* (see .env.example): file tools need
-AI_NEXUS_TOOL_FILES_ROOT; web_search needs AI_NEXUS_TOOL_WEB_SEARCH_ENABLED=true.
+AI_NEXUS_TOOL_FILES_ROOT; web_search is on by default (disable with
+AI_NEXUS_TOOL_WEB_SEARCH_ENABLED=false).
 """
 
 from __future__ import annotations

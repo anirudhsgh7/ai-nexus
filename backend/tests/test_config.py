@@ -97,7 +97,7 @@ TOOL_DEFAULTS = {
     "tool_result_max_chars": 2000,
     "tool_results_budget_chars": 6000,
     "tool_files_root": "",
-    "tool_web_search_enabled": False,
+    "tool_web_search_enabled": True,
     "tool_web_search_max_results": 5,
 }
 
@@ -182,7 +182,9 @@ def test_web_search_unknown_provider_rejected():
 
 
 def test_web_search_empty_providers_fail_only_when_enabled():
-    assert Settings(tool_web_search_providers=[]).tool_web_search_providers == []
+    assert Settings(
+        tool_web_search_enabled=False, tool_web_search_providers=[]
+    ).tool_web_search_providers == []
     with pytest.raises(ValidationError, match="at least one provider"):
         Settings(tool_web_search_enabled=True, tool_web_search_providers=[])
 

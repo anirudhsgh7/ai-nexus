@@ -80,13 +80,13 @@ def test_manager_capabilities_resolve_empty():
     assert registry.resolve(frozenset(), agent=AgentRole.MANAGER) == []
 
 
-def test_build_default_registers_only_memory():
-    assert build_tool_registry(Settings()).names == ["memory"]
+def test_build_default_registers_memory_and_web_search():
+    assert build_tool_registry(Settings()).names == ["memory", "web_search"]
 
 
 def test_build_with_files_root(tmp_path):
     registry = build_tool_registry(Settings(tool_files_root=str(tmp_path)))
-    assert registry.names == ["file_reader", "file_search", "memory"]
+    assert registry.names == ["file_reader", "file_search", "memory", "web_search"]
 
 
 def test_build_invalid_root_fails_fast():
@@ -95,9 +95,9 @@ def test_build_invalid_root_fails_fast():
 
 
 def test_build_web_flag_toggle():
-    assert "web_search" not in build_tool_registry(Settings()).names
-    assert "web_search" in build_tool_registry(
-        Settings(tool_web_search_enabled=True)
+    assert "web_search" in build_tool_registry(Settings()).names
+    assert "web_search" not in build_tool_registry(
+        Settings(tool_web_search_enabled=False)
     ).names
 
 
